@@ -8,13 +8,13 @@ import (
 type Adapter interface {
 	// Language returns the language identifier
 	Language() string
-	
+
 	// Extensions returns file extensions for this language
 	Extensions() []string
-	
+
 	// NormalizeSymbol adjusts symbol data for language-specific quirks
 	NormalizeSymbol(sym *lsp.DocumentSymbol) *lsp.DocumentSymbol
-	
+
 	// FileURI converts a file path to a URI for this language's LSP
 	FileURI(path string) string
 }
@@ -48,9 +48,11 @@ func LanguageFromExtension(ext string) string {
 		return "go"
 	case ".py", ".pyw":
 		return "python"
-	case ".ts", ".tsx", ".mts", ".cts":
+	case ".ts", ".mts", ".cts":
 		return "typescript"
-	case ".js", ".jsx", ".mjs", ".cjs":
+	case ".tsx", ".jsx":
+		return "typescriptreact"
+	case ".js", ".mjs", ".cjs":
 		return "typescript" // Use typescript LSP for JS too
 	case ".java":
 		return "java"

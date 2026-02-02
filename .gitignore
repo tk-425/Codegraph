@@ -33,7 +33,7 @@ coverage.html
 
 # Build Outputs
 dist/
-codegraph
+/codegraph
 
 # Code Graph Data
 .codegraph/
