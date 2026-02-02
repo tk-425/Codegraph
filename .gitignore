@@ -17,6 +17,9 @@ AGENTS.md
 # vmem
 .vmem/
 
+# Code Graph Data
+.codegraph/
+
 # Go
 vendor/
 *.exe
@@ -34,9 +37,6 @@ coverage.html
 # Build Outputs
 dist/
 /codegraph
-
-# Code Graph Data
-.codegraph/
 
 # System/Misc
 .DS_Store
