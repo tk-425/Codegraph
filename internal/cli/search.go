@@ -109,7 +109,10 @@ func runSearch(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("🔍 Found %s results for '%s':\n\n", Info(len(results)), Symbol(symbol))
 	for _, r := range results {
-		relPath, _ := filepath.Rel(cwd, r.File)
+		relPath, err := filepath.Rel(cwd, r.File)
+		if err != nil {
+			relPath = r.File
+		}
 		fmt.Printf("  %s [%s] (%s)\n", Symbol(r.Name), Keyword(r.Kind), Dim(r.Source))
 		fmt.Printf("    %s\n", Path(fmt.Sprintf("%s:%d", relPath, r.Line)))
 		if r.Signature != "" {

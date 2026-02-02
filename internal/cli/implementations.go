@@ -117,10 +117,7 @@ func runImplementations(cmd *cobra.Command, args []string) error {
 			}
 
 			for _, impl := range implementations {
-				implPath := impl.URI
-				if strings.HasPrefix(implPath, "file://") {
-					implPath = implPath[7:]
-				}
+				implPath := strings.TrimPrefix(impl.URI, "file://")
 
 				relPath, _ := filepath.Rel(cwd, implPath)
 				fmt.Printf("  %s:%d\n", relPath, impl.Range.Start.Line+1)

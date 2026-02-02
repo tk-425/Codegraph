@@ -92,19 +92,31 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 			fmt.Printf("\r   [%s] %d/%d files (%.0f%%) ", language, idx+1, langTotal, progress)
 
 			symbols, err := i.indexFile(ctx, client, file)
-			if err != nil {
+			
+			// Fallback if error OR if LSP returned 0 symbols (likely failed to process)
+			if err != nil || symbols == 0 {
+				if err != nil {
+					// Log error if it failed
+				} else {
+					// fmt.Printf("\n   ⚠️  LSP returned 0 symbols for %s, trying tree-sitter...\n", file.RelPath)
+				}
+				
 				// Try tree-sitter fallback
 				tsIndexer := NewTreeSitterIndexer(i.db, i.rootPath)
-				symbols, tsErr := tsIndexer.IndexFile(ctx, file)
+				tsSymbols, tsErr := tsIndexer.IndexFile(ctx, file)
 				if tsErr != nil {
-					fmt.Printf("\n   ⚠️  Error indexing %s: %v (tree-sitter: %v)\n", file.RelPath, err, tsErr)
+					if err != nil {
+						fmt.Printf("\n   ⚠️  Error indexing %s: %v (tree-sitter: %v)\n", file.RelPath, err, tsErr)
+					}
+					// If LSP managed 0 and tree-sitter failed, we just continue (count as 0)
 					continue
 				}
+				
 				// Tree-sitter succeeded
 				langIndexed++
 				langTreeSitter++
 				indexedFiles++
-				totalSymbols += symbols
+				totalSymbols += tsSymbols
 				continue
 			}
 
@@ -172,6 +184,19 @@ func (i *Indexer) shouldSkipFile(file FileInfo) (bool, error) {
 func (i *Indexer) indexFile(ctx context.Context, client *lsp.Client, file FileInfo) (int, error) {
 	// Convert path to URI
 	fileURI := pathToURI(file.Path)
+
+	// Read file content
+	content, err := os.ReadFile(file.Path)
+	if err != nil {
+		return 0, err
+	}
+	contentStr := string(content)
+
+	// Open document in LSP
+	if err := client.DidOpenTextDocument(fileURI, file.Language, contentStr); err != nil {
+		return 0, fmt.Errorf("failed to open document: %w", err)
+	}
+	defer client.DidCloseTextDocument(fileURI)
 
 	// Get document symbols from LSP
 	symbols, err := client.DocumentSymbols(ctx, fileURI)

@@ -50,6 +50,10 @@ func DefaultConfig() *Config {
 				Command: "typescript-language-server",
 				Args:    []string{"--stdio"},
 			},
+			"typescriptreact": {
+				Command: "typescript-language-server",
+				Args:    []string{"--stdio"},
+			},
 			"java": {
 				Command: "jdtls",
 				Args:    []string{"-data", "/tmp/jdtls-workspace"},

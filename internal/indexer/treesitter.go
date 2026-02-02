@@ -13,6 +13,7 @@ import (
 	"github.com/smacker/go-tree-sitter/python"
 	"github.com/smacker/go-tree-sitter/rust"
 	"github.com/smacker/go-tree-sitter/swift"
+	"github.com/smacker/go-tree-sitter/typescript/tsx"
 	"github.com/smacker/go-tree-sitter/typescript/typescript"
 	"github.com/tk-425/Codegraph/internal/db"
 )
@@ -80,7 +81,11 @@ func (t *TreeSitterIndexer) getLanguage(lang string) *sitter.Language {
 		return golang.GetLanguage()
 	case "python":
 		return python.GetLanguage()
-	case "typescript", "javascript":
+	case "typescript":
+		return typescript.GetLanguage()
+	case "typescriptreact":
+		return tsx.GetLanguage()
+	case "javascript":
 		return typescript.GetLanguage()
 	case "java":
 		return java.GetLanguage()
@@ -127,7 +132,7 @@ func (t *TreeSitterIndexer) nodeToSymbol(node *sitter.Node, content []byte, file
 		name, kind, signature = t.extractPythonSymbol(node, content)
 	case "swift":
 		name, kind, signature = t.extractSwiftSymbol(node, content)
-	case "typescript", "javascript":
+	case "typescript", "javascript", "typescriptreact":
 		name, kind, signature = t.extractTypeScriptSymbol(node, content)
 	case "java":
 		name, kind, signature = t.extractJavaSymbol(node, content)
