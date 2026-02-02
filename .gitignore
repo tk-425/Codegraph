@@ -1,0 +1,44 @@
+# docs
+.docs/
+
+# AI Agents
+.rulez/
+.claude/
+.agent/
+.codex/
+.gemini/
+.qwen/
+.mcp.json
+CLAUDE.md
+GEMINI.md
+QWEN.md
+AGENTS.md
+
+# vmem
+.vmem/
+
+# Go
+vendor/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+go.work
+go.work.sum
+coverage.out
+coverage.html
+
+# Build Outputs
+dist/
+codegraph
+
+# Code Graph Data
+.codegraph/
+
+# System/Misc
+.DS_Store
+*.log
+.env
