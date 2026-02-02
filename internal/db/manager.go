@@ -64,6 +64,20 @@ func (m *Manager) ClearAll() error {
 	return nil
 }
 
+// ClearCalls deletes all calls for a specific language
+func (m *Manager) ClearCalls(language string) error {
+	query := `
+		DELETE FROM calls 
+		WHERE caller_id IN (
+			SELECT id FROM symbols WHERE language = ?
+		)`
+	
+	if _, err := m.db.Exec(query, language); err != nil {
+		return fmt.Errorf("failed to clear calls for %s: %w", language, err)
+	}
+	return nil
+}
+
 // InsertSymbol inserts a symbol into the database
 func (m *Manager) InsertSymbol(s *Symbol) error {
 	_, err := m.db.Exec(`
