@@ -103,20 +103,20 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(results) == 0 {
-		fmt.Printf("🔍 No results found for: %s\n", symbol)
+		fmt.Printf("🔍 No results found for: %s\n", Warning(symbol))
 		return nil
 	}
 
-	fmt.Printf("🔍 Found %d results for '%s':\n\n", len(results), symbol)
+	fmt.Printf("🔍 Found %s results for '%s':\n\n", Info(len(results)), Symbol(symbol))
 	for _, r := range results {
 		relPath, _ := filepath.Rel(cwd, r.File)
-		fmt.Printf("  %s [%s] (%s)\n", r.Name, r.Kind, r.Source)
-		fmt.Printf("    %s:%d\n", relPath, r.Line)
+		fmt.Printf("  %s [%s] (%s)\n", Symbol(r.Name), Keyword(r.Kind), Dim(r.Source))
+		fmt.Printf("    %s\n", Path(fmt.Sprintf("%s:%d", relPath, r.Line)))
 		if r.Signature != "" {
-			fmt.Printf("    %s\n", r.Signature)
+			fmt.Printf("    %s\n", colorizeSignature(r.Signature))
 		} else if r.Context != "" {
 			// Show context for ripgrep matches
-			fmt.Printf("    %s\n", r.Context)
+			fmt.Printf("    %s\n", Dim(r.Context))
 		}
 		fmt.Println()
 	}

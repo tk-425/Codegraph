@@ -1,9 +1,16 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/tk-425/Codegraph/internal/config"
+	"github.com/tk-425/Codegraph/internal/db"
+	"github.com/tk-425/Codegraph/internal/lsp"
 )
 
 var implementationsLangFlag string
@@ -26,14 +33,104 @@ func init() {
 }
 
 func runImplementations(cmd *cobra.Command, args []string) error {
-	symbol := args[0]
-	fmt.Printf("🔧 Finding implementations of: %s\n", symbol)
-	
-	if implementationsLangFlag != "" {
-		fmt.Printf("   Languages: %s\n", implementationsLangFlag)
+	interfaceName := args[0]
+
+	// Get current directory
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get current directory: %w", err)
 	}
-	
-	// TODO: Implement implementations logic
-	fmt.Println("\n⚠️  Not yet implemented")
+
+	// Check if codegraph is initialized
+	codegraphDir := filepath.Join(cwd, ".codegraph")
+	if _, err := os.Stat(codegraphDir); os.IsNotExist(err) {
+		return fmt.Errorf("codegraph not initialized. Run 'codegraph init' first")
+	}
+
+	// Load config
+	cfg, err := config.Load(cwd)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	// Open database
+	dbPath := cfg.GetDatabasePath(cwd)
+	dbManager, err := db.NewManager(dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+	defer dbManager.Close()
+
+	// Parse languages filter
+	var languages []string
+	if implementationsLangFlag != "" {
+		languages = strings.Split(implementationsLangFlag, ",")
+	}
+
+	// Find interface symbols in database
+	symbols, err := dbManager.GetSymbolByName(interfaceName, languages)
+	if err != nil {
+		return fmt.Errorf("failed to find symbol: %w", err)
+	}
+
+	if len(symbols) == 0 {
+		fmt.Printf("🔧 No interface named '%s' found in database\n", interfaceName)
+		return nil
+	}
+
+	// Create LSP manager
+	rootURI := "file://" + cwd
+	lspManager := lsp.NewManager(cfg, rootURI)
+	defer lspManager.ShutdownAll()
+
+	ctx := context.Background()
+	found := false
+
+	for _, sym := range symbols {
+		// Only process interface-like symbols
+		if sym.Kind != "interface" && sym.Kind != "class" && sym.Kind != "struct" {
+			continue
+		}
+
+		// Get LSP client for this language
+		client, err := lspManager.GetClient(ctx, sym.Language)
+		if err != nil {
+			continue
+		}
+
+		// Get implementations via LSP
+		fileURI := "file://" + sym.File
+		pos := lsp.Position{
+			Line:      sym.Line - 1,
+			Character: sym.Column,
+		}
+
+		implementations, err := client.Implementation(ctx, fileURI, pos)
+		if err != nil {
+			continue
+		}
+
+		if len(implementations) > 0 {
+			if !found {
+				fmt.Printf("🔧 Implementations of %s (%d found):\n\n", interfaceName, len(implementations))
+				found = true
+			}
+
+			for _, impl := range implementations {
+				implPath := impl.URI
+				if strings.HasPrefix(implPath, "file://") {
+					implPath = implPath[7:]
+				}
+
+				relPath, _ := filepath.Rel(cwd, implPath)
+				fmt.Printf("  %s:%d\n", relPath, impl.Range.Start.Line+1)
+			}
+		}
+	}
+
+	if !found {
+		fmt.Printf("🔧 No implementations found for: %s\n", interfaceName)
+	}
+
 	return nil
 }

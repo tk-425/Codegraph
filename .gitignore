@@ -42,3 +42,6 @@ codegraph
 .DS_Store
 *.log
 .env
+
+# Test files (language adapter testing)
+tests/

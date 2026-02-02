@@ -2,8 +2,13 @@ package cli
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
+	"github.com/tk-425/Codegraph/internal/config"
+	"github.com/tk-425/Codegraph/internal/db"
 )
 
 var healthCmd = &cobra.Command{
@@ -11,8 +16,8 @@ var healthCmd = &cobra.Command{
 	Short: "Check the health of codegraph installation",
 	Long: `Check the health of codegraph by verifying:
 1. Database exists and is accessible
-2. LSP servers are available
-3. Configuration is valid`,
+2. Symbol and call counts
+3. Indexed languages`,
 	RunE: runHealth,
 }
 
@@ -23,13 +28,73 @@ func init() {
 func runHealth(cmd *cobra.Command, args []string) error {
 	fmt.Println("🏥 Checking codegraph health...")
 	fmt.Println()
-	
-	// TODO: Implement health checks
-	// 1. Check if .codegraph directory exists
-	// 2. Check if database is accessible
-	// 3. Check if LSP servers are installed
-	// 4. Check config validity
-	
-	fmt.Println("⚠️  Not yet implemented")
+
+	// Get current directory
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	// Check if codegraph is initialized
+	codegraphDir := filepath.Join(cwd, ".codegraph")
+	if _, err := os.Stat(codegraphDir); os.IsNotExist(err) {
+		fmt.Println("❌ Not initialized: Run 'codegraph init' first")
+		return nil
+	}
+	fmt.Println("✅ Initialized: .codegraph/ directory exists")
+
+	// Load config
+	cfg, err := config.Load(cwd)
+	if err != nil {
+		fmt.Printf("❌ Config error: %v\n", err)
+		return nil
+	}
+	fmt.Println("✅ Config: config.toml loaded")
+
+	// Check database
+	dbPath := cfg.GetDatabasePath(cwd)
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		fmt.Println("❌ Database: not found")
+		return nil
+	}
+
+	dbManager, err := db.NewManager(dbPath)
+	if err != nil {
+		fmt.Printf("%s Database error: %v\n", Error("❌"), err)
+		return nil
+	}
+	defer dbManager.Close()
+
+	// Get stats
+	stats, err := dbManager.GetStats()
+	if err != nil {
+		fmt.Printf("%s Stats error: %v\n", Error("❌"), err)
+		return nil
+	}
+
+	fmt.Printf("%s Database: accessible\n", Success("✅"))
+	fmt.Println()
+	fmt.Println(Bold("📊 Statistics:"))
+	fmt.Printf("   Symbols: %s\n", Info(stats.SymbolCount))
+	fmt.Printf("   Calls:   %s\n", Info(stats.CallCount))
+	fmt.Printf("   Files:   %s\n", Info(stats.FileCount))
+
+	if len(stats.Languages) > 0 {
+		fmt.Printf("   Languages: %s\n", Keyword(stats.Languages))
+	}
+
+	// Check LSP servers
+	fmt.Println()
+	fmt.Println(Bold("🔧 LSP Servers:"))
+	for lang, lspCfg := range cfg.LSP {
+		// Check if command exists
+		_, err := exec.LookPath(lspCfg.Command)
+		if err != nil {
+			fmt.Printf("   %s %s: %s not found\n", Error("❌"), lang, Warning(lspCfg.Command))
+		} else {
+			fmt.Printf("   %s %s: %s\n", Success("✅"), Keyword(lang), Dim(lspCfg.Command))
+		}
+	}
+
 	return nil
 }

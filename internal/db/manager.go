@@ -253,22 +253,7 @@ func (m *Manager) GetSymbolByName(name string, languages []string) ([]Symbol, er
 	return scanSymbols(rows)
 }
 
-// GetStats returns database statistics
-func (m *Manager) GetStats() (map[string]int64, error) {
-	stats := make(map[string]int64)
-	tables := []string{"symbols", "calls", "type_hierarchy", "file_meta"}
-
-	for _, table := range tables {
-		var count int64
-		err := m.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s", table)).Scan(&count)
-		if err != nil {
-			return nil, err
-		}
-		stats[table] = count
-	}
-
-	return stats, nil
-}
+// GetStats is defined below with Stats struct
 
 // UpdateFileMeta updates file metadata for incremental builds
 func (m *Manager) UpdateFileMeta(path string, modTime time.Time, language string) error {
@@ -295,6 +280,54 @@ func (m *Manager) GetFileMeta(path string) (*FileMeta, error) {
 		return nil, err
 	}
 	return &fm, nil
+}
+
+// Stats holds database statistics
+type Stats struct {
+	SymbolCount int
+	CallCount   int
+	FileCount   int
+	Languages   []string
+}
+
+// GetStats returns database statistics
+func (m *Manager) GetStats() (*Stats, error) {
+	stats := &Stats{}
+
+	// Get symbol count
+	err := m.db.QueryRow("SELECT COUNT(*) FROM symbols").Scan(&stats.SymbolCount)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get call count
+	err = m.db.QueryRow("SELECT COUNT(*) FROM calls").Scan(&stats.CallCount)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get file count
+	err = m.db.QueryRow("SELECT COUNT(DISTINCT file) FROM symbols").Scan(&stats.FileCount)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get languages
+	rows, err := m.db.Query("SELECT DISTINCT language FROM symbols")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var lang string
+		if err := rows.Scan(&lang); err != nil {
+			return nil, err
+		}
+		stats.Languages = append(stats.Languages, lang)
+	}
+
+	return stats, nil
 }
 
 // Helper functions
