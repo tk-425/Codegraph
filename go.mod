@@ -1,4 +1,4 @@
-module github.com/terrykang/codegraph
+module github.com/tk-425/Codegraph
 
 go 1.25.6
 
