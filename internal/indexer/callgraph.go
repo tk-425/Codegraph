@@ -36,6 +36,11 @@ func (c *CallGraphIndexer) IndexCallGraph(ctx context.Context, language string) 
 		return 0, fmt.Errorf("failed to get LSP client: %w", err)
 	}
 
+	// Clear existing call graph for this language to avoid duplicates
+	if err := c.db.ClearCalls(language); err != nil {
+		return 0, fmt.Errorf("failed to clear existing calls: %w", err)
+	}
+
 	// Get all function symbols from database
 	symbols, err := c.db.GetFunctionSymbols(language)
 	if err != nil {
