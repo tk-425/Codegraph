@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -46,12 +47,16 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 	// Group files by language
 	groups := GroupByLanguage(files)
 
-	totalFiles := len(files)
 	indexedFiles := 0
+	skippedFiles := 0
 	totalSymbols := 0
 
 	for language, langFiles := range groups {
-		fmt.Printf("   [%s] Indexing %d files...\n", language, len(langFiles))
+		langTotal := len(langFiles)
+		langIndexed := 0
+		langSkipped := 0
+		langLSP := 0
+		langTreeSitter := 0
 
 		// Get LSP client for this language
 		client, err := i.lsp.GetClient(ctx, language)
@@ -60,15 +65,60 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 			continue
 		}
 
-		for _, file := range langFiles {
+		// Some LSP servers need time to analyze the project after initialization
+		switch language {
+		case "rust":
+			time.Sleep(10 * time.Second)
+		case "java":
+			time.Sleep(10 * time.Second)
+		case "swift":
+			time.Sleep(10 * time.Second)
+		case "ocaml":
+			time.Sleep(10 * time.Second)
+		}
+
+		for idx, file := range langFiles {
+			// Check if file needs re-indexing (incremental build)
+			if !force {
+				if skip, _ := i.shouldSkipFile(file); skip {
+					langSkipped++
+					skippedFiles++
+					continue
+				}
+			}
+
+			// Show progress
+			progress := float64(idx+1) / float64(langTotal) * 100
+			fmt.Printf("\r   [%s] %d/%d files (%.0f%%) ", language, idx+1, langTotal, progress)
+
 			symbols, err := i.indexFile(ctx, client, file)
 			if err != nil {
-				fmt.Printf("   ⚠️  Error indexing %s: %v\n", file.RelPath, err)
+				// Try tree-sitter fallback
+				tsIndexer := NewTreeSitterIndexer(i.db, i.rootPath)
+				symbols, tsErr := tsIndexer.IndexFile(ctx, file)
+				if tsErr != nil {
+					fmt.Printf("\n   ⚠️  Error indexing %s: %v (tree-sitter: %v)\n", file.RelPath, err, tsErr)
+					continue
+				}
+				// Tree-sitter succeeded
+				langIndexed++
+				langTreeSitter++
+				indexedFiles++
+				totalSymbols += symbols
 				continue
 			}
 
+			langIndexed++
+			langLSP++
 			indexedFiles++
 			totalSymbols += symbols
+		}
+
+		// Clear progress line and show summary with source counts
+		if langIndexed > 0 {
+			fmt.Printf("\r   [%s] %d indexed (%d LSP, %d tree-sitter), %d skipped         \n", language, langIndexed, langLSP, langTreeSitter, langSkipped)
+		} else if langSkipped > 0 {
+			fmt.Printf("\r   [%s] 0 indexed, %d skipped (unchanged)         \n", language, langSkipped)
 		}
 	}
 
@@ -89,8 +139,33 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 	// Shutdown LSP servers
 	i.lsp.ShutdownAll()
 
-	fmt.Printf("✅ Indexed %d/%d files, %d symbols, %d calls\n", indexedFiles, totalFiles, totalSymbols, totalCalls)
+	fmt.Printf("✅ Indexed %d files, skipped %d unchanged, %d symbols, %d calls\n",
+		indexedFiles, skippedFiles, totalSymbols, totalCalls)
 	return nil
+}
+
+// shouldSkipFile checks if file is unchanged since last index
+func (i *Indexer) shouldSkipFile(file FileInfo) (bool, error) {
+	// Get file's current modification time
+	stat, err := os.Stat(file.Path)
+	if err != nil {
+		return false, err
+	}
+	currentMtime := stat.ModTime()
+
+	// Get stored metadata
+	meta, err := i.db.GetFileMeta(file.Path)
+	if err != nil {
+		return false, err
+	}
+
+	// If no metadata, file hasn't been indexed before
+	if meta == nil {
+		return false, nil
+	}
+
+	// Skip if file hasn't changed
+	return !currentMtime.After(meta.ModTime), nil
 }
 
 // indexFile indexes a single file and returns number of symbols stored

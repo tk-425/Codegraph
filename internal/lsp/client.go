@@ -60,7 +60,22 @@ func (e *ResponseError) Error() string {
 // NewClient creates a new LSP client
 func NewClient(command string, args []string, rootURI, language string) (*Client, error) {
 	cmd := exec.Command(command, args...)
-	cmd.Stderr = os.Stderr // Forward LSP stderr for debugging
+	
+	// For jdtls, filter out Java warnings from stderr
+	// For ocamllsp, filter out dune/merlin messages
+	if command == "jdtls" {
+		cmd.Stderr = &filteredWriter{
+			w:        os.Stderr,
+			language: "java",
+		}
+	} else if command == "ocamllsp" {
+		cmd.Stderr = &filteredWriter{
+			w:        os.Stderr,
+			language: "ocaml",
+		}
+	} else {
+		cmd.Stderr = os.Stderr // Forward LSP stderr for debugging
+	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -93,6 +108,58 @@ func NewClient(command string, args []string, rootURI, language string) (*Client
 	go client.readResponses()
 
 	return client, nil
+}
+
+// filteredWriter filters out warning lines from stderr
+type filteredWriter struct {
+	w        io.Writer
+	language string
+	buf      []byte
+}
+
+func (f *filteredWriter) Write(p []byte) (n int, err error) {
+	// Buffer the input to handle line-by-line filtering
+	f.buf = append(f.buf, p...)
+	
+	// Process complete lines
+	for {
+		idx := strings.IndexByte(string(f.buf), '\n')
+		if idx == -1 {
+			break
+		}
+		
+		line := string(f.buf[:idx+1])
+		f.buf = f.buf[idx+1:]
+		
+		// Skip Java warning lines for jdtls
+		if f.language == "java" {
+			if strings.Contains(line, "WARNING:") ||
+				strings.Contains(line, "INFO:") ||
+				strings.Contains(line, "sun.misc.Unsafe") ||
+				strings.Contains(line, "incubator modules") ||
+				strings.Contains(line, "spifly") ||
+				strings.Contains(line, "logback") {
+				continue
+			}
+		}
+		
+		// Skip OCaml dune/merlin messages for ocamllsp
+		if f.language == "ocaml" {
+			if strings.Contains(line, "halting dune") ||
+				strings.Contains(line, "closed merlin") ||
+				strings.Contains(line, "{ pid") ||
+				strings.Contains(line, "; initial_cwd") ||
+				strings.HasPrefix(strings.TrimSpace(line), "\"") ||
+				strings.TrimSpace(line) == "}" {
+				continue
+			}
+		}
+		
+		// Write non-filtered lines
+		f.w.Write([]byte(line))
+	}
+	
+	return len(p), nil
 }
 
 // Initialize sends the initialize request to the LSP server

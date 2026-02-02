@@ -77,17 +77,17 @@ func runCallers(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(callers) == 0 {
-		fmt.Printf("📞 No callers found for: %s\n", symbol)
+		fmt.Printf("📞 No callers found for: %s\n", Warning(symbol))
 		return nil
 	}
 
-	fmt.Printf("📞 Callers of %s (%d found):\n\n", symbol, len(callers))
+	fmt.Printf("📞 Callers of %s (%s found):\n\n", Symbol(symbol), Info(len(callers)))
 	for _, c := range callers {
 		relPath, _ := filepath.Rel(cwd, c.File)
-		fmt.Printf("  %s [%s]\n", c.Name, c.Kind)
-		fmt.Printf("    %s:%d\n", relPath, c.Line)
+		fmt.Printf("  %s [%s]\n", Symbol(c.Name), Keyword(c.Kind))
+		fmt.Printf("    %s\n", Path(fmt.Sprintf("%s:%d", relPath, c.Line)))
 		if c.Signature != "" {
-			fmt.Printf("    %s\n", c.Signature)
+			fmt.Printf("    %s\n", colorizeSignature(c.Signature))
 		}
 		fmt.Println()
 	}

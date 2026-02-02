@@ -77,17 +77,17 @@ func runCallees(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(callees) == 0 {
-		fmt.Printf("📤 No callees found for: %s\n", symbol)
+		fmt.Printf("📤 No callees found for: %s\n", Warning(symbol))
 		return nil
 	}
 
-	fmt.Printf("📤 Callees of %s (%d found):\n\n", symbol, len(callees))
+	fmt.Printf("📤 Callees of %s (%s found):\n\n", Symbol(symbol), Info(len(callees)))
 	for _, c := range callees {
 		relPath, _ := filepath.Rel(cwd, c.File)
-		fmt.Printf("  %s [%s]\n", c.Name, c.Kind)
-		fmt.Printf("    %s:%d\n", relPath, c.Line)
+		fmt.Printf("  %s [%s]\n", Symbol(c.Name), Keyword(c.Kind))
+		fmt.Printf("    %s\n", Path(fmt.Sprintf("%s:%d", relPath, c.Line)))
 		if c.Signature != "" {
-			fmt.Printf("    %s\n", c.Signature)
+			fmt.Printf("    %s\n", colorizeSignature(c.Signature))
 		}
 		fmt.Println()
 	}
