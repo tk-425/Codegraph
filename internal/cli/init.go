@@ -13,6 +13,7 @@ import (
 	"github.com/tk-425/Codegraph/internal/db"
 	"github.com/tk-425/Codegraph/internal/ignore"
 	"github.com/tk-425/Codegraph/internal/indexer"
+	"github.com/tk-425/Codegraph/internal/registry"
 )
 
 var initCmd = &cobra.Command{
@@ -107,7 +108,29 @@ func runInit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("indexing failed: %w", err)
 	}
 
+	// 7. Register project
+	if err := registerProject(cwd); err != nil {
+		fmt.Printf("⚠️  Failed to register project: %v\n", err)
+	} else {
+		fmt.Println("📋 Registered project in global registry")
+	}
+
 	return nil
+}
+
+func registerProject(cwd string) error {
+	regPath, err := registry.DefaultRegistryPath()
+	if err != nil {
+		return err
+	}
+
+	reg, err := registry.Load(regPath)
+	if err != nil {
+		return err
+	}
+
+	reg.Add(cwd, filepath.Base(cwd))
+	return reg.Save(regPath)
 }
 
 // updateGitignore adds .codegraph/ to .gitignore if not already present
