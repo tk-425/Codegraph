@@ -60,9 +60,9 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 
 		// Get LSP client for this language
 		client, err := i.lsp.GetClient(ctx, language)
+		// If err != nil, client is nil. Proceed to fallback.
 		if err != nil {
-			fmt.Printf("   ⚠️  Skipping %s: %v\n", language, err)
-			continue
+			fmt.Printf("   ⚠️  No LSP for %s (will use tree-sitter): %v\n", language, err)
 		}
 
 		// Some LSP servers need time to analyze the project after initialization
@@ -91,14 +91,20 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 			progress := float64(idx+1) / float64(langTotal) * 100
 			fmt.Printf("\r   [%s] %d/%d files (%.0f%%) ", language, idx+1, langTotal, progress)
 
-			symbols, err := i.indexFile(ctx, client, file)
+			symbols := 0
+			var err error
+
+			if client != nil {
+				symbols, err = i.indexFile(ctx, client, file)
+			} else {
+				// No LSP client, force fallback
+				err = fmt.Errorf("no LSP client")
+			}
 			
 			// Fallback if error OR if LSP returned 0 symbols (likely failed to process)
 			if err != nil || symbols == 0 {
-				if err != nil {
-					// Log error if it failed
-				} else {
-					// fmt.Printf("\n   ⚠️  LSP returned 0 symbols for %s, trying tree-sitter...\n", file.RelPath)
+				if err != nil && client != nil {
+					// Log real LSP errors (but sparse errors like 'no LSP client' are expected)
 				}
 				
 				// Try tree-sitter fallback

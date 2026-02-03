@@ -7,6 +7,9 @@ import (
 	"time"
 
 	sitter "github.com/smacker/go-tree-sitter"
+	"github.com/smacker/go-tree-sitter/c"
+	"github.com/smacker/go-tree-sitter/cpp"
+	"github.com/smacker/go-tree-sitter/csharp"
 	"github.com/smacker/go-tree-sitter/golang"
 	"github.com/smacker/go-tree-sitter/java"
 	"github.com/smacker/go-tree-sitter/ocaml"
@@ -95,6 +98,12 @@ func (t *TreeSitterIndexer) getLanguage(lang string) *sitter.Language {
 		return rust.GetLanguage()
 	case "ocaml":
 		return ocaml.GetLanguage()
+	case "c":
+		return c.GetLanguage()
+	case "cpp":
+		return cpp.GetLanguage()
+	case "csharp":
+		return csharp.GetLanguage()
 	default:
 		return nil
 	}
@@ -140,6 +149,12 @@ func (t *TreeSitterIndexer) nodeToSymbol(node *sitter.Node, content []byte, file
 		name, kind, signature = t.extractRustSymbol(node, content)
 	case "ocaml":
 		name, kind, signature = t.extractOCamlSymbol(node, content)
+	case "c":
+		name, kind, signature = t.extractCSymbol(node, content)
+	case "cpp":
+		name, kind, signature = t.extractCppSymbol(node, content)
+	case "csharp":
+		name, kind, signature = t.extractCSharpSymbol(node, content)
 	default:
 		return nil
 	}
@@ -423,4 +438,99 @@ func getFirstLine(s string) string {
 		return s[:idx]
 	}
 	return s
+}
+
+func (t *TreeSitterIndexer) extractCSymbol(node *sitter.Node, content []byte) (name, kind, signature string) {
+	switch node.Type() {
+	case "function_definition":
+		if declarator := node.ChildByFieldName("declarator"); declarator != nil {
+			if funcDecl := declarator.ChildByFieldName("declarator"); funcDecl != nil {
+				name = funcDecl.Content(content)
+			} else {
+				name = declarator.Content(content)
+			}
+			if idx := findParen(name); idx > 0 {
+				name = name[:idx]
+			}
+			kind = "function"
+			signature = getFirstLine(node.Content(content))
+		}
+	case "struct_specifier":
+		if nameNode := node.ChildByFieldName("name"); nameNode != nil {
+			name = nameNode.Content(content)
+			kind = "struct"
+		}
+	case "enum_specifier":
+		if nameNode := node.ChildByFieldName("name"); nameNode != nil {
+			name = nameNode.Content(content)
+			kind = "enum"
+		}
+	}
+	return
+}
+
+func (t *TreeSitterIndexer) extractCppSymbol(node *sitter.Node, content []byte) (name, kind, signature string) {
+	switch node.Type() {
+	case "function_definition":
+		if declarator := node.ChildByFieldName("declarator"); declarator != nil {
+			name = declarator.Content(content)
+			if idx := findParen(name); idx > 0 {
+				name = name[:idx]
+			}
+			kind = "function"
+			signature = getFirstLine(node.Content(content))
+		}
+	case "class_specifier":
+		if nameNode := node.ChildByFieldName("name"); nameNode != nil {
+			name = nameNode.Content(content)
+			kind = "class"
+		}
+	case "struct_specifier":
+		if nameNode := node.ChildByFieldName("name"); nameNode != nil {
+			name = nameNode.Content(content)
+			kind = "struct"
+		}
+	}
+	return
+}
+
+func (t *TreeSitterIndexer) extractCSharpSymbol(node *sitter.Node, content []byte) (name, kind, signature string) {
+	switch node.Type() {
+	case "class_declaration":
+		if nameNode := node.ChildByFieldName("name"); nameNode != nil {
+			name = nameNode.Content(content)
+			kind = "class"
+		}
+	case "interface_declaration":
+		if nameNode := node.ChildByFieldName("name"); nameNode != nil {
+			name = nameNode.Content(content)
+			kind = "interface"
+		}
+	case "method_declaration":
+		if nameNode := node.ChildByFieldName("name"); nameNode != nil {
+			name = nameNode.Content(content)
+			kind = "method"
+			signature = getFirstLine(node.Content(content))
+		}
+	case "struct_declaration":
+		if nameNode := node.ChildByFieldName("name"); nameNode != nil {
+			name = nameNode.Content(content)
+			kind = "struct"
+		}
+	case "enum_declaration":
+		if nameNode := node.ChildByFieldName("name"); nameNode != nil {
+			name = nameNode.Content(content)
+			kind = "enum"
+		}
+	}
+	return
+}
+
+func findParen(s string) int {
+	for i, c := range s {
+		if c == '(' {
+			return i
+		}
+	}
+	return -1
 }

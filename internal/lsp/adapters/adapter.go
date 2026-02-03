@@ -62,6 +62,12 @@ func LanguageFromExtension(ext string) string {
 		return "rust"
 	case ".ml", ".mli":
 		return "ocaml"
+	case ".c", ".h":
+		return "c"
+	case ".cpp", ".hpp", ".cc", ".cxx", ".hh":
+		return "cpp"
+	case ".cs":
+		return "csharp"
 	default:
 		return ""
 	}
@@ -78,5 +84,8 @@ func SupportedExtensions() []string {
 		".swift",
 		".rs",
 		".ml", ".mli",
+		".c", ".h",
+		".cpp", ".hpp", ".cc", ".cxx", ".hh",
+		".cs",
 	}
 }
