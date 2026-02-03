@@ -42,23 +42,23 @@ func runPrune(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(toRemove) == 0 {
-		fmt.Println("✨ No missing projects found")
+		fmt.Printf("✨ %s\n", Success("No missing projects found"))
 		return nil
 	}
 
-	fmt.Printf("Found %d missing projects:\n", len(toRemove))
+	fmt.Printf("🗑️  Found %s missing projects:\n\n", Warning(len(toRemove)))
 	for _, p := range toRemove {
-		fmt.Printf("  - %s\n", p)
+		fmt.Printf("  %s %s\n", Error("✗"), Path(p))
 	}
 
 	if !pruneForceFlag {
-		fmt.Print("\nRemove these from registry? [y/N] ")
+		fmt.Printf("\n%s [y/N] ", Bold("Remove these from registry?"))
 		reader := bufio.NewReader(os.Stdin)
 		response, _ := reader.ReadString('\n')
 		response = strings.ToLower(strings.TrimSpace(response))
 
 		if response != "y" && response != "yes" {
-			fmt.Println("Aborted")
+			fmt.Printf("%s\n", Warning("Aborted"))
 			return nil
 		}
 	}
@@ -71,6 +71,6 @@ func runPrune(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to save registry: %w", err)
 	}
 
-	fmt.Printf("✅ Removed %d projects from registry\n", len(toRemove))
+	fmt.Printf("✅ %s\n", Success(fmt.Sprintf("Removed %d projects from registry", len(toRemove))))
 	return nil
 }

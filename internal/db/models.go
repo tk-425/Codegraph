@@ -30,6 +30,22 @@ type Call struct {
 	Column   int    `json:"column"`    // Column of call
 }
 
+// CallerInfo combines caller symbol info with call site location
+type CallerInfo struct {
+	Symbol       // Embedded caller symbol
+	CallFile   string `json:"call_file"`   // File where call occurs
+	CallLine   int    `json:"call_line"`   // Line of call site
+	CallColumn int    `json:"call_column"` // Column of call site
+}
+
+// CalleeInfo combines callee symbol info with call site location
+type CalleeInfo struct {
+	Symbol       // Embedded callee symbol
+	CallFile   string `json:"call_file"`   // File where call occurs
+	CallLine   int    `json:"call_line"`   // Line of call site
+	CallColumn int    `json:"call_column"` // Column of call site
+}
+
 // TypeHierarchy represents a type relationship (extends, implements)
 type TypeHierarchy struct {
 	ID           int64  `json:"id"`

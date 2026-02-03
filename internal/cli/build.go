@@ -37,9 +37,9 @@ func init() {
 
 func runBuild(cmd *cobra.Command, args []string) error {
 	if forceFlag {
-		fmt.Println("🔄 Force rebuilding database...")
+		fmt.Printf("🔄 %s\n", Bold("Force rebuilding database..."))
 	} else {
-		fmt.Println("🔨 Building database...")
+		fmt.Printf("🔨 %s\n", Bold("Building database..."))
 	}
 
 	// Get current directory
@@ -70,11 +70,11 @@ func runBuild(cmd *cobra.Command, args []string) error {
 
 	languages := indexer.DetectedLanguages(files)
 	if len(languages) == 0 {
-		fmt.Println("⚠️  No supported source files found")
+		fmt.Printf("⚠️  %s\n", Warning("No supported source files found"))
 		return nil
 	}
-	fmt.Printf("🔍 Found %d files in %d languages (%s)\n",
-		len(files), len(languages), strings.Join(languages, ", "))
+	fmt.Printf("🔍 Found %s files in %s languages (%s)\n",
+		Info(len(files)), Info(len(languages)), Keyword(strings.Join(languages, ", ")))
 
 	// Open database
 	dbPath := cfg.GetDatabasePath(cwd)

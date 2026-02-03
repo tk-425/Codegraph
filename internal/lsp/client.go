@@ -61,20 +61,10 @@ func (e *ResponseError) Error() string {
 func NewClient(command string, args []string, rootURI, language string) (*Client, error) {
 	cmd := exec.Command(command, args...)
 	
-	// For jdtls, filter out Java warnings from stderr
-	// For ocamllsp, filter out dune/merlin messages
-	if command == "jdtls" {
-		cmd.Stderr = &filteredWriter{
-			w:        os.Stderr,
-			language: "java",
-		}
-	} else if command == "ocamllsp" {
-		cmd.Stderr = &filteredWriter{
-			w:        os.Stderr,
-			language: "ocaml",
-		}
-	} else {
-		cmd.Stderr = os.Stderr // Forward LSP stderr for debugging
+	// Use filtered writer for all LSP servers to suppress noisy stderr
+	cmd.Stderr = &filteredWriter{
+		w:        os.Stderr,
+		language: language,
 	}
 
 	stdin, err := cmd.StdinPipe()
@@ -151,6 +141,16 @@ func (f *filteredWriter) Write(p []byte) (n int, err error) {
 				strings.Contains(line, "; initial_cwd") ||
 				strings.HasPrefix(strings.TrimSpace(line), "\"") ||
 				strings.TrimSpace(line) == "}" {
+				continue
+			}
+		}
+		
+		// Skip rust-analyzer "unknown request" messages
+		if f.language == "rust" {
+			if strings.Contains(line, "ERROR unknown request") ||
+				strings.Contains(line, "prepareTypeHierarchy") ||
+				strings.Contains(line, "supertypes") ||
+				strings.Contains(line, "subtypes") {
 				continue
 			}
 		}

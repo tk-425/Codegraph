@@ -83,11 +83,13 @@ func runCallees(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("📤 Callees of %s (%s found):\n\n", Symbol(symbol), Info(len(callees)))
 	for _, c := range callees {
-		relPath, _ := filepath.Rel(cwd, c.File)
+		relPath, _ := filepath.Rel(cwd, c.CallFile)
 		fmt.Printf("  %s [%s]\n", Symbol(c.Name), Keyword(c.Kind))
-		fmt.Printf("    %s\n", Path(fmt.Sprintf("%s:%d", relPath, c.Line)))
-		if c.Signature != "" {
-			fmt.Printf("    %s\n", colorizeSignature(c.Signature))
+		fmt.Printf("    %s\n", Path(fmt.Sprintf("%s:%d", relPath, c.CallLine)))
+		
+		// Show the actual source line
+		if line := getSourceLine(c.CallFile, c.CallLine); line != "" {
+			fmt.Printf("    %s\n", Dim(line))
 		}
 		fmt.Println()
 	}
