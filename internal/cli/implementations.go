@@ -61,6 +61,23 @@ func runImplementations(cmd *cobra.Command, args []string) error {
 	}
 	defer dbManager.Close()
 
+	// First, try to find implementations in the database (from type_hierarchy table)
+	dbImplementations, err := dbManager.GetImplementationsByName(interfaceName)
+	if err == nil && len(dbImplementations) > 0 {
+		fmt.Printf("🔧 Implementations of %s (%s found):\n\n", Symbol(interfaceName), Info(len(dbImplementations)))
+		for _, impl := range dbImplementations {
+			relPath, _ := filepath.Rel(cwd, impl.File)
+			fmt.Printf("  %s [%s]\n", Symbol(impl.Name), Keyword(impl.Kind))
+			fmt.Printf("    %s\n", Path(fmt.Sprintf("%s:%d", relPath, impl.Line)))
+			if line := getSourceLine(impl.File, impl.Line); line != "" {
+				fmt.Printf("    %s\n", Dim(line))
+			}
+			fmt.Println()
+		}
+		return nil
+	}
+
+	// If no database results, try LSP as fallback
 	// Parse languages filter
 	var languages []string
 	if implementationsLangFlag != "" {
@@ -112,7 +129,7 @@ func runImplementations(cmd *cobra.Command, args []string) error {
 
 		if len(implementations) > 0 {
 			if !found {
-				fmt.Printf("🔧 Implementations of %s (%d found):\n\n", interfaceName, len(implementations))
+				fmt.Printf("🔧 Implementations of %s (%s found via LSP):\n\n", Symbol(interfaceName), Info(len(implementations)))
 				found = true
 			}
 
@@ -120,13 +137,13 @@ func runImplementations(cmd *cobra.Command, args []string) error {
 				implPath := strings.TrimPrefix(impl.URI, "file://")
 
 				relPath, _ := filepath.Rel(cwd, implPath)
-				fmt.Printf("  %s:%d\n", relPath, impl.Range.Start.Line+1)
+				fmt.Printf("  %s\n", Path(fmt.Sprintf("%s:%d", relPath, impl.Range.Start.Line+1)))
 			}
 		}
 	}
 
 	if !found {
-		fmt.Printf("🔧 No implementations found for: %s\n", interfaceName)
+		fmt.Printf("🔧 No implementations found for: %s\n", Warning(interfaceName))
 	}
 
 	return nil

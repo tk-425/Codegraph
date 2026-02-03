@@ -33,20 +33,22 @@ func runProjects(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(reg.Projects) == 0 {
-		fmt.Println("No projects found in registry")
+		fmt.Printf("📁 %s\n", Warning("No projects found in registry"))
 		return nil
 	}
 
+	fmt.Printf("📁 Projects (%s found):\n\n", Info(len(reg.Projects)))
+
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(w, "NAME\tPATH\tSTATUS\tLAST SEEN")
+	fmt.Fprintln(w, Bold("NAME")+"\t"+Bold("PATH")+"\t"+Bold("STATUS")+"\t"+Bold("LAST SEEN"))
 
 	for path, proj := range reg.Projects {
 		status := getProjectStatus(path)
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
-			proj.Name,
-			path,
+			Symbol(proj.Name),
+			Path(path),
 			status,
-			proj.LastSeen.Format(time.RFC822),
+			Dim(proj.LastSeen.Format(time.RFC822)),
 		)
 	}
 	w.Flush()
@@ -56,16 +58,16 @@ func runProjects(cmd *cobra.Command, args []string) error {
 func getProjectStatus(path string) string {
 	info, err := os.Stat(path)
 	if os.IsNotExist(err) {
-		return "MISSING ⚠️"
+		return "❌ " + Error("Missing")
 	}
 	if !info.IsDir() {
-		return "INVALID (File)"
+		return "⚠️ " + Warning("Invalid")
 	}
 
 	cgDir := filepath.Join(path, ".codegraph")
 	if _, err := os.Stat(cgDir); os.IsNotExist(err) {
-		return "Uninitialized ⚠️"
+		return "⚠️ " + Warning("Uninitialized")
 	}
 
-	return "Active ✅"
+	return "✅ " + Success("Active")
 }

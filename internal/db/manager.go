@@ -71,9 +71,23 @@ func (m *Manager) ClearCalls(language string) error {
 		WHERE caller_id IN (
 			SELECT id FROM symbols WHERE language = ?
 		)`
-	
+
 	if _, err := m.db.Exec(query, language); err != nil {
 		return fmt.Errorf("failed to clear calls for %s: %w", language, err)
+	}
+	return nil
+}
+
+// ClearTypeHierarchy deletes all type hierarchy for a specific language
+func (m *Manager) ClearTypeHierarchy(language string) error {
+	query := `
+		DELETE FROM type_hierarchy 
+		WHERE child_id IN (
+			SELECT id FROM symbols WHERE language = ?
+		)`
+
+	if _, err := m.db.Exec(query, language); err != nil {
+		return fmt.Errorf("failed to clear type hierarchy for %s: %w", language, err)
 	}
 	return nil
 }
@@ -110,6 +124,45 @@ func (m *Manager) InsertTypeHierarchy(th *TypeHierarchy) error {
 	return err
 }
 
+// GetImplementations returns symbols that implement/extend the given parent symbol
+func (m *Manager) GetImplementations(parentID string) ([]Symbol, error) {
+	query := `
+		SELECT s.id, s.name, s.kind, s.file, s.line, s.column, s.end_line, s.end_column, 
+			   s.scope, s.signature, s.documentation, s.language, s.source, s.created_at
+		FROM symbols s
+		INNER JOIN type_hierarchy th ON s.id = th.child_id
+		WHERE th.parent_id = ?
+		ORDER BY s.file, s.line`
+
+	rows, err := m.db.Query(query, parentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return scanSymbols(rows)
+}
+
+// GetImplementationsByName returns symbols that implement/extend a type by its name
+func (m *Manager) GetImplementationsByName(typeName string) ([]Symbol, error) {
+	query := `
+		SELECT s.id, s.name, s.kind, s.file, s.line, s.column, s.end_line, s.end_column, 
+			   s.scope, s.signature, s.documentation, s.language, s.source, s.created_at
+		FROM symbols s
+		INNER JOIN type_hierarchy th ON s.id = th.child_id
+		INNER JOIN symbols parent ON th.parent_id = parent.id
+		WHERE parent.name = ?
+		ORDER BY s.file, s.line`
+
+	rows, err := m.db.Query(query, typeName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return scanSymbols(rows)
+}
+
 // SearchSymbols searches for symbols by name with optional filters
 func (m *Manager) SearchSymbols(name string, kind string, languages []string) ([]Symbol, error) {
 	query := "SELECT id, name, kind, file, line, column, end_line, end_column, scope, signature, documentation, language, source, created_at FROM symbols WHERE name LIKE ?"
@@ -118,6 +171,9 @@ func (m *Manager) SearchSymbols(name string, kind string, languages []string) ([
 	if kind != "" {
 		query += " AND kind = ?"
 		args = append(args, kind)
+	} else {
+		// By default, exclude module/package declarations from search results
+		query += " AND kind != 'module'"
 	}
 
 	if len(languages) > 0 {
@@ -138,17 +194,27 @@ func (m *Manager) SearchSymbols(name string, kind string, languages []string) ([
 	return scanSymbols(rows)
 }
 
-// GetCallers finds all callers of a symbol
-func (m *Manager) GetCallers(symbolName string, languages []string) ([]Symbol, error) {
+// GetCallers finds all callers of a symbol with call site info
+func (m *Manager) GetCallers(symbolName string, languages []string) ([]CallerInfo, error) {
 	// Join calls table to find caller symbols
-	// callee_id format is path#name (e.g., internal/db/manager.go#NewManager)
+	// callee_id format varies:
+	// - Go: path#FunctionName
+	// - Java: path#Class.methodName(params)
+	// - C#: path#ClassName.MethodName
+	// We need to match when symbolName appears after # or after . (for method names)
 	query := `
-		SELECT DISTINCT s.id, s.name, s.kind, s.file, s.line, s.column, s.end_line, s.end_column, 
-		       s.scope, s.signature, s.documentation, s.language, s.source, s.created_at
+		SELECT s.id, s.name, s.kind, s.file, s.line, s.column, s.end_line, s.end_column, 
+		       s.scope, s.signature, s.documentation, s.language, s.source, s.created_at,
+		       c.file as call_file, c.line as call_line, c.column as call_column
 		FROM symbols s
 		JOIN calls c ON s.id = c.caller_id
-		WHERE c.callee_id LIKE ?`
-	args := []interface{}{"%#" + symbolName}
+		WHERE (c.callee_id LIKE ? OR c.callee_id LIKE ? OR c.callee_id LIKE ?)`
+	// Match: #symbolName, #Class.symbolName, or .symbolName(
+	args := []interface{}{
+		"%#" + symbolName,          // Exact function: path#FunctionName
+		"%#%." + symbolName + "(%", // Method with params: path#Class.method(
+		"%." + symbolName,          // Method without params: path#Class.method
+	}
 
 	if len(languages) > 0 {
 		query += " AND s.language IN (?" + repeatString(",?", len(languages)-1) + ")"
@@ -157,7 +223,8 @@ func (m *Manager) GetCallers(symbolName string, languages []string) ([]Symbol, e
 		}
 	}
 
-	query += " ORDER BY s.file, s.line"
+	// Group by call site to avoid duplicates when multiple callees match (e.g., interface + impl)
+	query += " GROUP BY c.file, c.line, c.column ORDER BY c.file, c.line"
 
 	rows, err := m.db.Query(query, args...)
 	if err != nil {
@@ -165,22 +232,45 @@ func (m *Manager) GetCallers(symbolName string, languages []string) ([]Symbol, e
 	}
 	defer rows.Close()
 
-	return scanSymbols(rows)
+	var callers []CallerInfo
+	for rows.Next() {
+		var c CallerInfo
+		var endLine, endColumn *int
+		err := rows.Scan(
+			&c.ID, &c.Name, &c.Kind, &c.File, &c.Line, &c.Column,
+			&endLine, &endColumn, &c.Scope, &c.Signature, &c.Documentation,
+			&c.Language, &c.Source, &c.CreatedAt,
+			&c.CallFile, &c.CallLine, &c.CallColumn,
+		)
+		if err != nil {
+			return nil, err
+		}
+		c.EndLine = endLine
+		c.EndColumn = endColumn
+		callers = append(callers, c)
+	}
+	return callers, rows.Err()
 }
 
-// GetCallees finds all callees of a symbol
-func (m *Manager) GetCallees(symbolName string, languages []string) ([]Symbol, error) {
-	// First get calls where caller matches
+// GetCallees finds all callees of a symbol with call site info
+func (m *Manager) GetCallees(symbolName string, languages []string) ([]CalleeInfo, error) {
+	// Match caller names flexibly:
+	// - Exact match: main
+	// - Method with params: main(String[])
+	// - Qualified: Class.main
 	query := `
-		SELECT DISTINCT s.id, s.name, s.kind, s.file, s.line, s.column, s.end_line, s.end_column, 
-		       s.scope, s.signature, s.documentation, s.language, s.source, s.created_at
+		SELECT s.id, s.name, s.kind, s.file, s.line, s.column, s.end_line, s.end_column, 
+		       s.scope, s.signature, s.documentation, s.language, s.source, s.created_at,
+		       c.file as call_file, c.line as call_line, c.column as call_column
 		FROM symbols s
-		WHERE s.id IN (
-			SELECT c.callee_id FROM calls c
-			JOIN symbols caller ON c.caller_id = caller.id
-			WHERE caller.name = ?
-		)`
-	args := []interface{}{symbolName}
+		JOIN calls c ON s.id = c.callee_id
+		JOIN symbols caller ON c.caller_id = caller.id
+		WHERE (caller.name = ? OR caller.name LIKE ? OR caller.name LIKE ?)`
+	args := []interface{}{
+		symbolName,               // Exact match
+		symbolName + "(%",        // Method with params: main(
+		"%." + symbolName + "(%", // Qualified with params: Class.main(
+	}
 
 	if len(languages) > 0 {
 		query += " AND s.language IN (?" + repeatString(",?", len(languages)-1) + ")"
@@ -189,7 +279,8 @@ func (m *Manager) GetCallees(symbolName string, languages []string) ([]Symbol, e
 		}
 	}
 
-	query += " ORDER BY s.file, s.line"
+	// Group by call site to deduplicate (interface + impl at same line)
+	query += " GROUP BY c.file, c.line, c.column ORDER BY c.file, c.line"
 
 	rows, err := m.db.Query(query, args...)
 	if err != nil {
@@ -197,16 +288,41 @@ func (m *Manager) GetCallees(symbolName string, languages []string) ([]Symbol, e
 	}
 	defer rows.Close()
 
-	return scanSymbols(rows)
+	var callees []CalleeInfo
+	for rows.Next() {
+		var c CalleeInfo
+		var endLine, endColumn *int
+		err := rows.Scan(
+			&c.ID, &c.Name, &c.Kind, &c.File, &c.Line, &c.Column,
+			&endLine, &endColumn, &c.Scope, &c.Signature, &c.Documentation,
+			&c.Language, &c.Source, &c.CreatedAt,
+			&c.CallFile, &c.CallLine, &c.CallColumn,
+		)
+		if err != nil {
+			return nil, err
+		}
+		c.EndLine = endLine
+		c.EndColumn = endColumn
+		callees = append(callees, c)
+	}
+	return callees, rows.Err()
 }
 
 // GetSignature finds the signature of a symbol
 func (m *Manager) GetSignature(symbolName string, languages []string) ([]Symbol, error) {
+	// Match symbol names flexibly:
+	// - Exact match: main
+	// - Method with params: main(String[])
+	// - Qualified: Class.main
 	query := `
 		SELECT id, name, kind, file, line, column, end_line, end_column, scope, signature, documentation, language, source, created_at
 		FROM symbols
-		WHERE name = ? AND signature IS NOT NULL AND signature != ''`
-	args := []interface{}{symbolName}
+		WHERE (name = ? OR name LIKE ? OR name LIKE ?) AND signature IS NOT NULL AND signature != ''`
+	args := []interface{}{
+		symbolName,               // Exact match
+		symbolName + "(%",        // Method with params: main(
+		"%." + symbolName + "(%", // Qualified with params: Class.main(
+	}
 
 	if len(languages) > 0 {
 		query += " AND language IN (?" + repeatString(",?", len(languages)-1) + ")"
@@ -241,13 +357,38 @@ func (m *Manager) GetFunctionSymbols(language string) ([]Symbol, error) {
 	return scanSymbols(rows)
 }
 
-// GetSymbolByName returns symbol by exact name match
-func (m *Manager) GetSymbolByName(name string, languages []string) ([]Symbol, error) {
+// GetTypeSymbols returns all class/interface/struct symbols for a language
+func (m *Manager) GetTypeSymbols(language string) ([]Symbol, error) {
 	query := `
 		SELECT id, name, kind, file, line, column, end_line, end_column, scope, signature, documentation, language, source, created_at
 		FROM symbols
-		WHERE name = ?`
-	args := []interface{}{name}
+		WHERE kind IN ('class', 'interface', 'struct', 'type', 'enum') AND language = ?
+		ORDER BY file, line`
+
+	rows, err := m.db.Query(query, language)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return scanSymbols(rows)
+}
+
+// GetSymbolByName returns symbol by name (flexible matching)
+func (m *Manager) GetSymbolByName(name string, languages []string) ([]Symbol, error) {
+	// Match symbol names flexibly:
+	// - Exact match: main
+	// - Method with params: main(String[])
+	// - Qualified: Class.main
+	query := `
+		SELECT id, name, kind, file, line, column, end_line, end_column, scope, signature, documentation, language, source, created_at
+		FROM symbols
+		WHERE (name = ? OR name LIKE ? OR name LIKE ?)`
+	args := []interface{}{
+		name,               // Exact match
+		name + "(%",        // Method with params: main(
+		"%." + name + "(%", // Qualified with params: Class.main(
+	}
 
 	if len(languages) > 0 {
 		query += " AND language IN (?" + repeatString(",?", len(languages)-1) + ")"

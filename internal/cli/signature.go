@@ -71,29 +71,41 @@ func runSignature(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to find symbol: %w", err)
 	}
 
-	if len(symbols) == 0 {
-		fmt.Printf("📝 No symbol named '%s' found\n", Warning(symbol))
+	// Filter to only functions/methods
+	var filtered []db.Symbol
+	for _, sym := range symbols {
+		if sym.Kind == "function" || sym.Kind == "method" {
+			filtered = append(filtered, sym)
+		}
+	}
+
+	if len(filtered) == 0 {
+		fmt.Printf("📝 No function/method named '%s' found\n", Warning(symbol))
 		return nil
 	}
 
-	fmt.Printf("📝 Signature for '%s' (%s found):\n\n", Symbol(symbol), Info(len(symbols)))
+	fmt.Printf("📝 Signature for '%s' (%s found):\n\n", Symbol(symbol), Info(len(filtered)))
 
-	for _, sym := range symbols {
-		// Only show functions/methods
-		if sym.Kind != "function" && sym.Kind != "method" {
-			continue
-		}
-
+	for _, sym := range filtered {
 		relPath, _ := filepath.Rel(cwd, sym.File)
-		
-		// Display colorized signature
-		if sym.Signature != "" {
-			colorized := colorizeSignature(sym.Signature)
-			fmt.Printf("  %s\n", colorized)
-		} else {
-			fmt.Printf("  %s [%s]\n", Symbol(sym.Name), Dim(sym.Kind))
+
+		fmt.Printf("  %s [%s]\n", Symbol(sym.Name), Keyword(sym.Kind))
+		fmt.Printf("    %s\n", Path(fmt.Sprintf("%s:%d", relPath, sym.Line)))
+
+		// Show signature and source line
+		sourceLine := getSourceLine(sym.File, sym.Line)
+		if sym.Signature != "" && strings.TrimSpace(sym.Signature) != "" {
+			// Show: signature → source
+			sig := strings.TrimSpace(sym.Signature)
+			if sourceLine != "" {
+				fmt.Printf("    %s → %s\n", Type(sig), Dim(sourceLine))
+			} else {
+				fmt.Printf("    %s\n", Type(sig))
+			}
+		} else if sourceLine != "" {
+			fmt.Printf("    %s\n", Dim(sourceLine))
 		}
-		fmt.Printf("    %s\n\n", Path(fmt.Sprintf("%s:%d", relPath, sym.Line)))
+		fmt.Println()
 	}
 
 	return nil

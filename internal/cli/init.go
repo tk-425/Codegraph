@@ -34,7 +34,7 @@ func init() {
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
-	fmt.Println("📁 Initializing codegraph...")
+	fmt.Printf("📁 %s\n", Bold("Initializing codegraph..."))
 
 	// Get current directory
 	cwd, err := os.Getwd()
@@ -54,20 +54,20 @@ func runInit(cmd *cobra.Command, args []string) error {
 	if err := config.Save(cwd, cfg); err != nil {
 		return fmt.Errorf("failed to create config: %w", err)
 	}
-	fmt.Println("📁 Created .codegraph/config.toml")
+	fmt.Printf("📁 Created %s\n", Path(".codegraph/config.toml"))
 
 	// 3. Create .cgignore
 	cgignorePath := filepath.Join(codegraphDir, ".cgignore")
 	if err := ignore.CreateDefaultCGIgnore(codegraphDir); err != nil {
 		return fmt.Errorf("failed to create .cgignore: %w", err)
 	}
-	fmt.Println("📁 Created .codegraph/.cgignore")
+	fmt.Printf("📁 Created %s\n", Path(".codegraph/.cgignore"))
 
 	// 4. Update .gitignore
 	if err := updateGitignore(cwd); err != nil {
-		fmt.Printf("⚠️  Could not update .gitignore: %v\n", err)
+		fmt.Printf("⚠️  %s: %v\n", Warning("Could not update .gitignore"), err)
 	} else {
-		fmt.Println("📝 Added \".codegraph/\" to .gitignore")
+		fmt.Printf("📝 Added %s to .gitignore\n", Dim("\".codegraph/\""))
 	}
 
 	// 5. Detect languages
@@ -79,13 +79,13 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 	languages := indexer.DetectedLanguages(files)
 	if len(languages) == 0 {
-		fmt.Println("⚠️  No supported source files found")
+		fmt.Printf("⚠️  %s\n", Warning("No supported source files found"))
 		return nil
 	}
-	fmt.Printf("🔍 Detected languages: %s\n", strings.Join(languages, ", "))
+	fmt.Printf("🔍 Detected languages: %s\n", Keyword(strings.Join(languages, ", ")))
 
 	// 6. Run indexing
-	fmt.Println("🚀 Starting indexing...")
+	fmt.Printf("🚀 %s\n", Bold("Starting indexing..."))
 
 	// Open database
 	dbPath := cfg.GetDatabasePath(cwd)
@@ -110,9 +110,9 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 	// 7. Register project
 	if err := registerProject(cwd); err != nil {
-		fmt.Printf("⚠️  Failed to register project: %v\n", err)
+		fmt.Printf("⚠️  %s: %v\n", Warning("Failed to register project"), err)
 	} else {
-		fmt.Println("📋 Registered project in global registry")
+		fmt.Printf("📋 %s\n", Success("Registered project in global registry"))
 	}
 
 	return nil

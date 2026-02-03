@@ -26,8 +26,7 @@ func init() {
 }
 
 func runHealth(cmd *cobra.Command, args []string) error {
-	fmt.Println("🏥 Checking codegraph health...")
-	fmt.Println()
+	fmt.Printf("🏥 %s\n\n", Bold("Checking codegraph health..."))
 
 	// Get current directory
 	cwd, err := os.Getwd()
@@ -38,29 +37,29 @@ func runHealth(cmd *cobra.Command, args []string) error {
 	// Check if codegraph is initialized
 	codegraphDir := filepath.Join(cwd, ".codegraph")
 	if _, err := os.Stat(codegraphDir); os.IsNotExist(err) {
-		fmt.Println("❌ Not initialized: Run 'codegraph init' first")
+		fmt.Printf("❌ %s: Run 'codegraph init' first\n", Error("Not initialized"))
 		return nil
 	}
-	fmt.Println("✅ Initialized: .codegraph/ directory exists")
+	fmt.Printf("✅ %s: .codegraph/ directory exists\n", Success("Initialized"))
 
 	// Load config
 	cfg, err := config.Load(cwd)
 	if err != nil {
-		fmt.Printf("❌ Config error: %v\n", err)
+		fmt.Printf("❌ %s: %v\n", Error("Config error"), err)
 		return nil
 	}
-	fmt.Println("✅ Config: config.toml loaded")
+	fmt.Printf("✅ %s: config.toml loaded\n", Success("Config"))
 
 	// Check database
 	dbPath := cfg.GetDatabasePath(cwd)
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		fmt.Println("❌ Database: not found")
+		fmt.Printf("❌ %s: not found\n", Error("Database"))
 		return nil
 	}
 
 	dbManager, err := db.NewManager(dbPath)
 	if err != nil {
-		fmt.Printf("%s Database error: %v\n", Error("❌"), err)
+		fmt.Printf("❌ %s: %v\n", Error("Database error"), err)
 		return nil
 	}
 	defer dbManager.Close()
@@ -68,16 +67,16 @@ func runHealth(cmd *cobra.Command, args []string) error {
 	// Get stats
 	stats, err := dbManager.GetStats()
 	if err != nil {
-		fmt.Printf("%s Stats error: %v\n", Error("❌"), err)
+		fmt.Printf("❌ %s: %v\n", Error("Stats error"), err)
 		return nil
 	}
 
-	fmt.Printf("%s Database: accessible\n", Success("✅"))
+	fmt.Printf("✅ %s: accessible\n", Success("Database"))
 	fmt.Println()
-	fmt.Println(Bold("📊 Statistics:"))
-	fmt.Printf("   Symbols: %s\n", Info(stats.SymbolCount))
-	fmt.Printf("   Calls:   %s\n", Info(stats.CallCount))
-	fmt.Printf("   Files:   %s\n", Info(stats.FileCount))
+	fmt.Printf("📊 %s\n", Bold("Statistics:"))
+	fmt.Printf("   Symbols:   %s\n", Info(stats.SymbolCount))
+	fmt.Printf("   Calls:     %s\n", Info(stats.CallCount))
+	fmt.Printf("   Files:     %s\n", Info(stats.FileCount))
 
 	if len(stats.Languages) > 0 {
 		fmt.Printf("   Languages: %s\n", Keyword(stats.Languages))
@@ -85,14 +84,14 @@ func runHealth(cmd *cobra.Command, args []string) error {
 
 	// Check LSP servers
 	fmt.Println()
-	fmt.Println(Bold("🔧 LSP Servers:"))
+	fmt.Printf("🔧 %s\n", Bold("LSP Servers:"))
 	for lang, lspCfg := range cfg.LSP {
 		// Check if command exists
 		_, err := exec.LookPath(lspCfg.Command)
 		if err != nil {
-			fmt.Printf("   %s %s: %s not found\n", Error("❌"), lang, Warning(lspCfg.Command))
+			fmt.Printf("   ❌ %s: %s not found\n", Warning(lang), Error(lspCfg.Command))
 		} else {
-			fmt.Printf("   %s %s: %s\n", Success("✅"), Keyword(lang), Dim(lspCfg.Command))
+			fmt.Printf("   ✅ %s: %s\n", Keyword(lang), Dim(lspCfg.Command))
 		}
 	}
 

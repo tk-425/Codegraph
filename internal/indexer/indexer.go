@@ -154,11 +154,33 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 	}
 	fmt.Printf("   Found %d call relationships\n", totalCalls)
 
+	// Index type hierarchy for each language
+	fmt.Println("🔗 Extracting type hierarchy...")
+	hierarchyIndexer := NewHierarchyIndexer(i.db, i.lsp, i.rootPath)
+	totalHierarchy := 0
+
+	// Try LSP-based hierarchy first, fall back to tree-sitter if no results
+	for language := range groups {
+		count, err := hierarchyIndexer.IndexHierarchyLSP(ctx, language)
+		if err != nil || count == 0 {
+			// LSP hierarchy failed or returned nothing, try tree-sitter
+			for _, file := range groups[language] {
+				tsCount, tsErr := hierarchyIndexer.IndexHierarchyTreeSitter(ctx, file)
+				if tsErr == nil {
+					totalHierarchy += tsCount
+				}
+			}
+			continue
+		}
+		totalHierarchy += count
+	}
+	fmt.Printf("   Found %d type relationships\n", totalHierarchy)
+
 	// Shutdown LSP servers
 	i.lsp.ShutdownAll()
 
-	fmt.Printf("✅ Indexed %d files, skipped %d unchanged, %d symbols, %d calls\n",
-		indexedFiles, skippedFiles, totalSymbols, totalCalls)
+	fmt.Printf("✅ Indexed %d files, skipped %d unchanged, %d symbols, %d calls, %d type relations\n",
+		indexedFiles, skippedFiles, totalSymbols, totalCalls, totalHierarchy)
 	return nil
 }
 

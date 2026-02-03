@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -83,14 +84,35 @@ func runCallers(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("📞 Callers of %s (%s found):\n\n", Symbol(symbol), Info(len(callers)))
 	for _, c := range callers {
-		relPath, _ := filepath.Rel(cwd, c.File)
+		relPath, _ := filepath.Rel(cwd, c.CallFile)
 		fmt.Printf("  %s [%s]\n", Symbol(c.Name), Keyword(c.Kind))
-		fmt.Printf("    %s\n", Path(fmt.Sprintf("%s:%d", relPath, c.Line)))
-		if c.Signature != "" {
-			fmt.Printf("    %s\n", colorizeSignature(c.Signature))
+		fmt.Printf("    %s\n", Path(fmt.Sprintf("%s:%d", relPath, c.CallLine)))
+		
+		// Show the actual source line
+		if line := getSourceLine(c.CallFile, c.CallLine); line != "" {
+			fmt.Printf("    %s\n", Dim(line))
 		}
 		fmt.Println()
 	}
 
 	return nil
+}
+
+// getSourceLine reads a specific line from a file
+func getSourceLine(filePath string, lineNum int) string {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	currentLine := 0
+	for scanner.Scan() {
+		currentLine++
+		if currentLine == lineNum {
+			return strings.TrimSpace(scanner.Text())
+		}
+	}
+	return ""
 }
