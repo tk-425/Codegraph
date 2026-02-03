@@ -40,9 +40,9 @@ go build -o codegraph ./cmd/codegraph
 mv codegraph /usr/local/bin/
 ```
 
-### Pre-requisites
+### Recommended Tools (LSP)
 
-CodeGraph relies on language servers being installed on your machine.
+CodeGraph works best with Language Servers installed for precise call graphs and type hierarchies. If an LSP is not found, CodeGraph will **automatically fallback to Tree-sitter** for symbol extraction.
 
 - **Go**: `go install golang.org/x/tools/gopls@latest`
 - **Python**: `pip install pyright`
