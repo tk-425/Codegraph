@@ -21,6 +21,7 @@ var DefaultPatterns = []string{
 	"*.egg-info",
 	"dist",
 	"build",
+	"_build", // OCaml/Dune
 	".build",
 	".tox",
 

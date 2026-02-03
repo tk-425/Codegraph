@@ -71,10 +71,10 @@ func runSignature(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to find symbol: %w", err)
 	}
 
-	// Filter to only functions/methods
+	// Filter to only functions/methods (and variables for OCaml where functions are let-bindings)
 	var filtered []db.Symbol
 	for _, sym := range symbols {
-		if sym.Kind == "function" || sym.Kind == "method" {
+		if sym.Kind == "function" || sym.Kind == "method" || sym.Kind == "variable" {
 			filtered = append(filtered, sym)
 		}
 	}

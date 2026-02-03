@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/tk-425/Codegraph/internal/config"
@@ -100,13 +101,13 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 				// No LSP client, force fallback
 				err = fmt.Errorf("no LSP client")
 			}
-			
+
 			// Fallback if error OR if LSP returned 0 symbols (likely failed to process)
 			if err != nil || symbols == 0 {
 				if err != nil && client != nil {
 					// Log real LSP errors (but sparse errors like 'no LSP client' are expected)
 				}
-				
+
 				// Try tree-sitter fallback
 				tsIndexer := NewTreeSitterIndexer(i.db, i.rootPath)
 				tsSymbols, tsErr := tsIndexer.IndexFile(ctx, file)
@@ -117,7 +118,7 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 					// If LSP managed 0 and tree-sitter failed, we just continue (count as 0)
 					continue
 				}
-				
+
 				// Tree-sitter succeeded
 				langIndexed++
 				langTreeSitter++
@@ -143,11 +144,23 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 	// Index call graph for each language
 	fmt.Println("📊 Extracting call graph (via references)...")
 	callGraphIndexer := NewCallGraphIndexer(i.db, i.lsp, i.rootPath)
+	callExtractor := NewCallExtractor(i.db, i.rootPath)
 	totalCalls := 0
 	for language := range groups {
+		// Try LSP-based call graph first
 		calls, err := callGraphIndexer.IndexCallGraph(ctx, language)
-		if err != nil {
-			fmt.Printf("   ⚠️  Call graph error for %s: %v\n", language, err)
+		if err != nil || calls == 0 {
+			// LSP failed or returned nothing, try tree-sitter
+			for _, file := range groups[language] {
+				tsCount, tsErr := callExtractor.ExtractCalls(ctx, file)
+				if tsErr == nil {
+					totalCalls += tsCount
+				}
+			}
+			if err != nil {
+				// Only show warning if there was an actual error (not just 0 results)
+				fmt.Printf("   ⚠️  Call graph LSP error for %s (using tree-sitter): %v\n", language, err)
+			}
 			continue
 		}
 		totalCalls += calls
@@ -266,7 +279,7 @@ func (i *Indexer) storeSymbols(file FileInfo, symbols []lsp.DocumentSymbol, scop
 			EndLine:       intPtr(sym.Range.End.Line + 1),
 			EndColumn:     intPtr(sym.Range.End.Character),
 			Scope:         scope,
-			Signature:     sym.Detail,
+			Signature:     extractReturnType(sym.Detail, file.Language),
 			Documentation: "",
 			Language:      file.Language,
 			Source:        "lsp",
@@ -311,4 +324,33 @@ func pathToURI(path string) string {
 
 func intPtr(i int) *int {
 	return &i
+}
+
+// extractReturnType extracts just the return type from a full function signature
+// For Rust: "fn(&self, a: f64, b: f64) -> f64" -> "f64"
+// For Java: ": double" -> "double"
+func extractReturnType(signature, language string) string {
+	if signature == "" {
+		return ""
+	}
+
+	switch language {
+	case "rust":
+		// Rust format: fn(...) -> ReturnType
+		if _, after, ok := strings.Cut(signature, "->"); ok {
+			return strings.TrimSpace(after)
+		}
+		// No return type means ()
+		if strings.HasPrefix(signature, "fn(") {
+			return "()"
+		}
+	case "java":
+		// Java LSP returns ": returnType" format (sometimes with leading space)
+		trimmed := strings.TrimSpace(signature)
+		if strings.HasPrefix(trimmed, ":") {
+			return strings.TrimSpace(strings.TrimPrefix(trimmed, ":"))
+		}
+	}
+
+	return signature
 }

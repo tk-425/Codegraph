@@ -10,6 +10,7 @@ import (
 	"github.com/smacker/go-tree-sitter/csharp"
 	"github.com/smacker/go-tree-sitter/golang"
 	"github.com/smacker/go-tree-sitter/java"
+	"github.com/smacker/go-tree-sitter/ocaml"
 	"github.com/smacker/go-tree-sitter/python"
 	"github.com/smacker/go-tree-sitter/rust"
 	"github.com/smacker/go-tree-sitter/swift"
@@ -179,6 +180,8 @@ func (h *HierarchyIndexer) getLanguage(lang string) *sitter.Language {
 		return rust.GetLanguage()
 	case "go":
 		return golang.GetLanguage()
+	case "ocaml":
+		return ocaml.GetLanguage()
 	default:
 		return nil
 	}
@@ -203,6 +206,8 @@ func (h *HierarchyIndexer) extractHierarchy(node *sitter.Node, content []byte, f
 		relationships = h.extractRustHierarchy(node, content, file)
 	case "go":
 		relationships = h.extractGoHierarchy(node, content, file)
+	case "ocaml":
+		relationships = h.extractOCamlHierarchy(node, content, file)
 	}
 
 	return relationships
@@ -539,6 +544,51 @@ func (h *HierarchyIndexer) extractGoHierarchy(node *sitter.Node, content []byte,
 					}
 				}
 			}
+		}
+	})
+
+	return relationships
+}
+
+// OCaml hierarchy: module Calculator : ICalculator = struct ... end
+func (h *HierarchyIndexer) extractOCamlHierarchy(node *sitter.Node, content []byte, file FileInfo) []*db.TypeHierarchy {
+	var relationships []*db.TypeHierarchy
+
+	h.walkTree(node, func(n *sitter.Node) {
+		if n.Type() != "module_definition" {
+			return
+		}
+
+		// Find module_binding child
+		for i := 0; i < int(n.NamedChildCount()); i++ {
+			child := n.NamedChild(i)
+			if child.Type() != "module_binding" {
+				continue
+			}
+
+			// Find module_name and module_type in module_binding's children
+			var moduleName string
+			var moduleTypeName string
+			for j := 0; j < int(child.NamedChildCount()); j++ {
+				nameChild := child.NamedChild(j)
+				if nameChild.Type() == "module_name" {
+					moduleName = nameChild.Content(content)
+				}
+				// The module type constraint appears as module_type_path
+				if nameChild.Type() == "module_type_path" || nameChild.Type() == "module_type_name" {
+					moduleTypeName = nameChild.Content(content)
+				}
+			}
+
+			if moduleTypeName != "" && moduleName != "" {
+				childID := fmt.Sprintf("%s#%s", file.RelPath, moduleName)
+				relationships = append(relationships, &db.TypeHierarchy{
+					ChildID:      childID,
+					ParentID:     moduleTypeName,
+					Relationship: "implements",
+				})
+			}
+			break
 		}
 	})
 
