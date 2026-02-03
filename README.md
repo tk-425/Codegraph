@@ -48,6 +48,9 @@ CodeGraph works best with Language Servers installed for precise call graphs and
 - **Python**: `pip install pyright`
 - **TypeScript**: `npm install -g typescript-language-server typescript`
 - **Rust**: `rustup component add rust-analyzer`
+- **Java**: `brew install jdtls` (macOS) or via [official setup](https://github.com/eclipse/eclipse.jdt.ls#installation)
+- **Swift**: Included with Xcode (`sourcekit-lsp`)
+- **OCaml**: `opam install ocaml-lsp-server`
 
 ## ⚡ Quick Start
 
