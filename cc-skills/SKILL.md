@@ -18,6 +18,7 @@ Use CodeGraph for **specific symbol lookups** when you know the exact name:
 - **"Show me X signature"** - "What parameters does validateUser take?"
 - **"What implements X?"** - "What implements the Repository interface?"
 - **"Trace call chain"** - "Show me the call chain for handleError"
+- **"Show project stats"** - "What's the size of this codebase?"
 
 **Do NOT use CodeGraph for conceptual questions** where you don't know the exact symbol name — use CodeFind instead.
 
@@ -108,6 +109,15 @@ Examples:
 
 ### Diagnostics (Auto-Invoked)
 
+**Show Project Statistics**
+```bash
+codegraph stats                       # Formatted output with sections
+codegraph stats --json                # JSON output for parsing
+codegraph stats --compact             # Single line summary
+```
+
+Shows symbol counts by kind, call edges, language breakdown, last build time, files indexed, and database size.
+
 **Check Installation Health**
 ```bash
 codegraph health
@@ -169,5 +179,6 @@ Go, Python, TypeScript, JavaScript, Java, Rust, Swift, OCaml (with LSP integrati
 - `codegraph search`: < 1s (database lookup)
 - `codegraph callers --depth=1`: < 1s (single-level)
 - `codegraph callers --depth=3`: 1-3s (multi-level)
+- `codegraph stats`: < 1s (database aggregation)
 - `codegraph build`: 1-5s (incremental)
 - `codegraph build --force`: 10-60s (full reindex)

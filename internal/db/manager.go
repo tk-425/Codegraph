@@ -485,6 +485,152 @@ func (m *Manager) GetStats() (*Stats, error) {
 	return stats, nil
 }
 
+// LanguageStats holds per-language statistics
+type LanguageStats struct {
+	Language string
+	Count    int
+	Percent  float64
+}
+
+// DetailedStats holds comprehensive database statistics
+type DetailedStats struct {
+	// Symbol counts by kind
+	TotalSymbols int
+	Functions    int
+	Methods      int
+	Classes      int
+	Interfaces   int
+	Structs      int
+	Types        int
+	Enums        int
+	Variables    int
+	Constants    int
+	Modules      int
+
+	// Call graph
+	CallEdges int
+
+	// Languages breakdown
+	Languages []LanguageStats
+
+	// Last build info
+	LastBuildTime *time.Time
+	FilesIndexed  int
+
+	// Database info
+	DatabasePath string
+	DatabaseSize int64
+}
+
+// GetDetailedStats returns comprehensive database statistics
+func (m *Manager) GetDetailedStats() (*DetailedStats, error) {
+	stats := &DetailedStats{
+		DatabasePath: m.dbPath,
+	}
+
+	// 1. Get total symbol count
+	err := m.db.QueryRow("SELECT COUNT(*) FROM symbols").Scan(&stats.TotalSymbols)
+	if err != nil {
+		return nil, err
+	}
+
+	// 2. Get symbol counts grouped by kind
+	kindRows, err := m.db.Query(`
+		SELECT kind, COUNT(*) as count
+		FROM symbols
+		GROUP BY kind
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer kindRows.Close()
+
+	for kindRows.Next() {
+		var kind string
+		var count int
+		if err := kindRows.Scan(&kind, &count); err != nil {
+			return nil, err
+		}
+		switch kind {
+		case "function":
+			stats.Functions = count
+		case "method":
+			stats.Methods = count
+		case "class":
+			stats.Classes = count
+		case "interface":
+			stats.Interfaces = count
+		case "struct":
+			stats.Structs = count
+		case "type":
+			stats.Types = count
+		case "enum":
+			stats.Enums = count
+		case "variable":
+			stats.Variables = count
+		case "constant":
+			stats.Constants = count
+		case "module":
+			stats.Modules = count
+		}
+	}
+
+	// 3. Get call edge count
+	err = m.db.QueryRow("SELECT COUNT(*) FROM calls").Scan(&stats.CallEdges)
+	if err != nil {
+		return nil, err
+	}
+
+	// 4. Get language breakdown with percentages
+	langRows, err := m.db.Query(`
+		SELECT language, COUNT(*) as count
+		FROM symbols
+		GROUP BY language
+		ORDER BY count DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer langRows.Close()
+
+	for langRows.Next() {
+		var lang string
+		var count int
+		if err := langRows.Scan(&lang, &count); err != nil {
+			return nil, err
+		}
+		percent := float64(count) / float64(stats.TotalSymbols) * 100
+		stats.Languages = append(stats.Languages, LanguageStats{
+			Language: lang,
+			Count:    count,
+			Percent:  percent,
+		})
+	}
+
+	// 5. Get last build time (max mod_time from file_meta)
+	var lastBuild sql.NullTime
+	err = m.db.QueryRow("SELECT MAX(mod_time) FROM file_meta").Scan(&lastBuild)
+	if err != nil {
+		return nil, err
+	}
+	if lastBuild.Valid {
+		stats.LastBuildTime = &lastBuild.Time
+	}
+
+	// 6. Get files indexed count
+	err = m.db.QueryRow("SELECT COUNT(*) FROM file_meta").Scan(&stats.FilesIndexed)
+	if err != nil {
+		return nil, err
+	}
+
+	// 7. Get database file size
+	if info, err := os.Stat(m.dbPath); err == nil {
+		stats.DatabaseSize = info.Size()
+	}
+
+	return stats, nil
+}
+
 // Helper functions
 
 func scanSymbols(rows *sql.Rows) ([]Symbol, error) {
