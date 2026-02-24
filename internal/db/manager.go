@@ -608,13 +608,17 @@ func (m *Manager) GetDetailedStats() (*DetailedStats, error) {
 	}
 
 	// 5. Get last build time (max mod_time from file_meta)
-	var lastBuild sql.NullTime
-	err = m.db.QueryRow("SELECT MAX(mod_time) FROM file_meta").Scan(&lastBuild)
+	var lastBuildStr sql.NullString
+	err = m.db.QueryRow("SELECT MAX(mod_time) FROM file_meta").Scan(&lastBuildStr)
 	if err != nil {
 		return nil, err
 	}
-	if lastBuild.Valid {
-		stats.LastBuildTime = &lastBuild.Time
+	if lastBuildStr.Valid {
+		// Parse RFC3339 format
+		lastBuildTime, err := time.Parse(time.RFC3339, lastBuildStr.String)
+		if err == nil {
+			stats.LastBuildTime = &lastBuildTime
+		}
 	}
 
 	// 6. Get files indexed count
