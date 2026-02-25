@@ -36,6 +36,9 @@ func init() {
 }
 
 func runBuild(cmd *cobra.Command, args []string) error {
+	printBanner(cmd.OutOrStdout())
+	fmt.Println()
+
 	if forceFlag {
 		fmt.Printf("🔄 %s\n", Bold("Force rebuilding database..."))
 	} else {
