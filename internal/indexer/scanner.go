@@ -23,11 +23,16 @@ type Scanner struct {
 }
 
 // NewScanner creates a new file scanner
-func NewScanner(rootPath string, ignorePath string) *Scanner {
+func NewScanner(rootPath string, ignorePath string) (*Scanner, error) {
+	matcher, err := ignore.NewMatcher(ignorePath)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Scanner{
 		rootPath: rootPath,
-		ignore:   ignore.NewMatcher(ignorePath),
-	}
+		ignore:   matcher,
+	}, nil
 }
 
 // Scan discovers all source files in the project
@@ -41,10 +46,11 @@ func (s *Scanner) Scan() ([]FileInfo, error) {
 
 		// Get relative path
 		relPath, _ := filepath.Rel(s.rootPath, path)
+		relPath = filepath.ToSlash(relPath)
 
 		// Skip ignored paths
-		if s.ignore.ShouldIgnore(relPath) {
-			if info.IsDir() {
+		if s.ignore.ShouldIgnore(relPath, info.IsDir()) {
+			if info.IsDir() && s.ignore.ShouldSkipDir(relPath) {
 				return filepath.SkipDir
 			}
 			return nil

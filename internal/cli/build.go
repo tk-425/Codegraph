@@ -18,15 +18,14 @@ var forceFlag bool
 var buildCmd = &cobra.Command{
 	Use:   "build",
 	Short: "Build or rebuild the symbol database",
-	Long: `Build the codegraph database by indexing all source files.
-
-This command:
-1. Scans for source files (respecting .cgignore)
-2. Starts LSP servers for detected languages
-3. Extracts symbols from all source files
-4. Stores symbols in the database
-
-Use --force to perform a full rebuild (delete and recreate database).`,
+	Long: "Build the codegraph database by indexing all source files.\n\n" +
+		"This command:\n" +
+		"1. Scans for source files (respecting .codegraph/.cgignore)\n" +
+		"2. Starts LSP servers for detected languages\n" +
+		"3. Extracts symbols from all source files\n" +
+		"4. Stores symbols in the database\n\n" +
+		"Edit `.codegraph/.cgignore` and rerun `codegraph build` to change what gets indexed.\n\n" +
+		"Use --force to perform a full rebuild (delete and recreate database).",
 	RunE: runBuild,
 }
 
@@ -65,7 +64,10 @@ func runBuild(cmd *cobra.Command, args []string) error {
 
 	// Scan for files
 	cgignorePath := filepath.Join(codegraphDir, ".cgignore")
-	scanner := indexer.NewScanner(cwd, cgignorePath)
+	scanner, err := indexer.NewScanner(cwd, cgignorePath)
+	if err != nil {
+		return fmt.Errorf("failed to prepare scanner: %w", err)
+	}
 	files, err := scanner.Scan()
 	if err != nil {
 		return fmt.Errorf("failed to scan files: %w", err)

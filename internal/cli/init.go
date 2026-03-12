@@ -22,7 +22,7 @@ var initCmd = &cobra.Command{
 	Long: `Initialize codegraph by:
 1. Creating .codegraph/ directory
 2. Creating config.toml with LSP configurations
-3. Creating .cgignore for excluding files
+3. Creating .cgignore seeded from .gitignore
 4. Adding .codegraph/ to .gitignore
 5. Auto-detecting languages in the project
 6. Running initial indexing`,
@@ -58,10 +58,10 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 	// 3. Create .cgignore
 	cgignorePath := filepath.Join(codegraphDir, ".cgignore")
-	if err := ignore.CreateDefaultCGIgnore(codegraphDir); err != nil {
+	if err := ignore.CreateDefaultCGIgnore(codegraphDir, cwd); err != nil {
 		return fmt.Errorf("failed to create .cgignore: %w", err)
 	}
-	fmt.Printf("📁 Created %s\n", Path(".codegraph/.cgignore"))
+	fmt.Printf("📁 Created %s (seeded from %s when available)\n", Path(".codegraph/.cgignore"), Dim("\".gitignore\""))
 
 	// 4. Update .gitignore
 	if err := updateGitignore(cwd); err != nil {
@@ -71,7 +71,10 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 
 	// 5. Detect languages
-	scanner := indexer.NewScanner(cwd, cgignorePath)
+	scanner, err := indexer.NewScanner(cwd, cgignorePath)
+	if err != nil {
+		return fmt.Errorf("failed to prepare scanner: %w", err)
+	}
 	files, err := scanner.Scan()
 	if err != nil {
 		return fmt.Errorf("failed to scan files: %w", err)
