@@ -61,7 +61,9 @@ CodeGraph works best with Language Servers installed for precise call graphs and
     codegraph init
     ```
 
-    This will detect languages, create `.codegraph/config.toml`, and start the initial index.
+    This will detect languages, create `.codegraph/config.toml`, seed `.codegraph/.cgignore` from `.gitignore` when present, and start the initial index.
+
+    After initialization, CodeGraph uses `.codegraph/.cgignore` as the indexing policy. If you edit that file, rerun `codegraph build` to refresh the database.
 
 2.  **Search for Symbols**
     Find functions, classes, or variables:
