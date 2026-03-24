@@ -2,7 +2,6 @@ package cli
 
 import (
 	"bufio"
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,9 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/tk-425/Codegraph/internal/config"
-	"github.com/tk-425/Codegraph/internal/db"
 	"github.com/tk-425/Codegraph/internal/ignore"
-	"github.com/tk-425/Codegraph/internal/indexer"
 	"github.com/tk-425/Codegraph/internal/registry"
 )
 
@@ -24,8 +21,9 @@ var initCmd = &cobra.Command{
 2. Creating config.toml with LSP configurations
 3. Creating .cgignore seeded from .gitignore
 4. Adding .codegraph/ to .gitignore
-5. Auto-detecting languages in the project
-6. Running initial indexing`,
+
+After initialization, edit .codegraph/.cgignore to customize what gets indexed,
+then run 'codegraph build' to index your project.`,
 	RunE: runInit,
 }
 
@@ -57,7 +55,6 @@ func runInit(cmd *cobra.Command, args []string) error {
 	fmt.Printf("📁 Created %s\n", Path(".codegraph/config.toml"))
 
 	// 3. Create .cgignore
-	cgignorePath := filepath.Join(codegraphDir, ".cgignore")
 	if err := ignore.CreateDefaultCGIgnore(codegraphDir, cwd); err != nil {
 		return fmt.Errorf("failed to create .cgignore: %w", err)
 	}
@@ -70,53 +67,14 @@ func runInit(cmd *cobra.Command, args []string) error {
 		fmt.Printf("📝 Added %s to .gitignore\n", Dim("\".codegraph/\""))
 	}
 
-	// 5. Detect languages
-	scanner, err := indexer.NewScanner(cwd, cgignorePath)
-	if err != nil {
-		return fmt.Errorf("failed to prepare scanner: %w", err)
-	}
-	files, err := scanner.Scan()
-	if err != nil {
-		return fmt.Errorf("failed to scan files: %w", err)
-	}
-
-	languages := indexer.DetectedLanguages(files)
-	if len(languages) == 0 {
-		fmt.Printf("⚠️  %s\n", Warning("No supported source files found"))
-		return nil
-	}
-	fmt.Printf("🔍 Detected languages: %s\n", Keyword(strings.Join(languages, ", ")))
-
-	// 6. Run indexing
-	fmt.Printf("🚀 %s\n", Bold("Starting indexing..."))
-
-	// Open database
-	dbPath := cfg.GetDatabasePath(cwd)
-	dbManager, err := db.NewManager(dbPath)
-	if err != nil {
-		return fmt.Errorf("failed to open database: %w", err)
-	}
-	defer dbManager.Close()
-
-	if err := dbManager.Initialize(); err != nil {
-		return fmt.Errorf("failed to initialize database: %w", err)
-	}
-
-	// Create indexer and run
-	idx := indexer.NewIndexer(cfg, dbManager, cwd)
-	defer idx.Close()
-
-	ctx := context.Background()
-	if err := idx.IndexProject(ctx, files, true); err != nil {
-		return fmt.Errorf("indexing failed: %w", err)
-	}
-
-	// 7. Register project
+	// 5. Register project
 	if err := registerProject(cwd); err != nil {
 		fmt.Printf("⚠️  %s: %v\n", Warning("Failed to register project"), err)
 	} else {
 		fmt.Printf("📋 %s\n", Success("Registered project in global registry"))
 	}
+
+	fmt.Printf("✅ %s\n", Success("Done. Edit .codegraph/.cgignore to customize what gets indexed, then run 'codegraph build'."))
 
 	return nil
 }
