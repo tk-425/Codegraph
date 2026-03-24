@@ -78,6 +78,59 @@ func TestScannerUsesSeededCGIgnore(t *testing.T) {
 	}
 }
 
+// TestScannerNegationDoesNotDisableUnrelatedDirPruning verifies that a negation
+// pattern targeting one directory (e.g. .vscode) does not prevent efficient
+// pruning of unrelated ignored directories (e.g. node_modules).
+func TestScannerNegationDoesNotDisableUnrelatedDirPruning(t *testing.T) {
+	projectRoot := t.TempDir()
+	codegraphDir := filepath.Join(projectRoot, ".codegraph")
+	if err := os.MkdirAll(codegraphDir, 0o755); err != nil {
+		t.Fatalf("mkdir .codegraph: %v", err)
+	}
+	nodeModulesDir := filepath.Join(projectRoot, "node_modules", "pkg")
+	if err := os.MkdirAll(nodeModulesDir, 0o755); err != nil {
+		t.Fatalf("mkdir node_modules/pkg: %v", err)
+	}
+	vscodeDir := filepath.Join(projectRoot, ".vscode")
+	if err := os.MkdirAll(vscodeDir, 0o755); err != nil {
+		t.Fatalf("mkdir .vscode: %v", err)
+	}
+	srcDir := filepath.Join(projectRoot, "src")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatalf("mkdir src: %v", err)
+	}
+
+	// .vscode/* ignored but extensions.json negated — unrelated to node_modules
+	patterns := ".vscode/*\n!.vscode/extensions.json\nnode_modules\n"
+	if err := os.WriteFile(filepath.Join(codegraphDir, ".cgignore"), []byte(patterns), 0o644); err != nil {
+		t.Fatalf("write .cgignore: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nodeModulesDir, "index.go"), []byte("package pkg\n"), 0o644); err != nil {
+		t.Fatalf("write node_modules file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(vscodeDir, "extensions.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write extensions.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("write src/main.go: %v", err)
+	}
+
+	scanner, err := indexer.NewScanner(projectRoot, filepath.Join(codegraphDir, ".cgignore"))
+	if err != nil {
+		t.Fatalf("NewScanner: %v", err)
+	}
+
+	files, err := scanner.Scan()
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	// Only src/main.go should be indexed — node_modules and .vscode are excluded
+	if len(files) != 1 || files[0].RelPath != "src/main.go" {
+		t.Fatalf("unexpected files: %#v", files)
+	}
+}
+
 func TestScannerSupportsNegationWithoutSkippingDir(t *testing.T) {
 	projectRoot := t.TempDir()
 	codegraphDir := filepath.Join(projectRoot, ".codegraph")

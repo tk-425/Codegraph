@@ -81,9 +81,9 @@ var DefaultPatterns = []string{
 
 // Matcher handles ignore pattern matching.
 type Matcher struct {
-	matcher     *goignore.Matcher
-	patterns    []string
-	hasNegation bool
+	matcher        *goignore.Matcher
+	patterns       []string
+	noPruneParents map[string]bool
 }
 
 // NewMatcher creates a matcher that evaluates .cgignore using gitignore-style semantics.
@@ -108,7 +108,7 @@ func NewMatcher(cgignorePath string) (*Matcher, error) {
 	}
 
 	m.patterns = append(m.patterns, extractPatterns(content)...)
-	m.hasNegation = hasNegationPatterns(content)
+	m.noPruneParents = extractNoPruneParents(content)
 
 	if warnings := m.matcher.AddPatterns("", content); len(warnings) > 0 {
 		return nil, formatWarnings(cgignorePath, warnings)
@@ -127,8 +127,12 @@ func (m *Matcher) ShouldIgnore(path string, isDir bool) bool {
 }
 
 // ShouldSkipDir reports whether the walker can prune an ignored directory safely.
+// A directory is not pruned if a negation pattern targets something inside it.
 func (m *Matcher) ShouldSkipDir(path string) bool {
-	return m.ShouldIgnore(path, true) && !m.hasNegation
+	if m.noPruneParents[normalizePath(path)] {
+		return false
+	}
+	return m.ShouldIgnore(path, true)
 }
 
 // GetPatterns returns all active patterns.
@@ -182,13 +186,28 @@ func extractPatterns(content []byte) []string {
 	return patterns
 }
 
-func hasNegationPatterns(content []byte) bool {
+// extractNoPruneParents returns the set of directories that must not be pruned
+// because a negation pattern targets a path inside them.
+// e.g. "!.vscode/extensions.json" → {".vscode": true}
+// e.g. "!a/b/c.go"               → {"a": true, "a/b": true}
+func extractNoPruneParents(content []byte) map[string]bool {
+	parents := make(map[string]bool)
 	for _, pattern := range extractPatterns(content) {
-		if strings.HasPrefix(pattern, "!") {
-			return true
+		if !strings.HasPrefix(pattern, "!") {
+			continue
+		}
+		// Strip leading "!" and any leading "/"
+		p := strings.TrimPrefix(pattern[1:], "/")
+		// Walk up all ancestor directories
+		for {
+			p = filepath.Dir(p)
+			if p == "." || p == "" || p == "/" {
+				break
+			}
+			parents[filepath.ToSlash(p)] = true
 		}
 	}
-	return false
+	return parents
 }
 
 func normalizePath(path string) string {
