@@ -74,9 +74,26 @@ func runInit(cmd *cobra.Command, args []string) error {
 		fmt.Printf("📋 %s\n", Success("Registered project in global registry"))
 	}
 
+	reportAgentNoteResult(applyAgentNote(cwd))
+
 	fmt.Printf("✅ %s\n", Success("Done. Edit .codegraph/.cgignore to customize what gets indexed, then run 'codegraph build'."))
 
 	return nil
+}
+
+func reportAgentNoteResult(result agentNoteResult) {
+	for _, name := range result.Updated {
+		fmt.Printf("📝 Added %s to %s\n", Success("CodeGraph agent note"), Path(name))
+	}
+	for _, name := range result.Skipped {
+		fmt.Printf("⏭️  %s already has %s\n", Path(name), Success("CodeGraph agent note"))
+	}
+	for _, warning := range result.Warnings {
+		fmt.Printf("⚠️  %s: %s\n", Warning("Could not update agent instruction file"), warning)
+	}
+	if result.ManualCopyBlock != "" {
+		fmt.Printf("📋 %s\n%s", Success("Manual-copy block"), result.ManualCopyBlock)
+	}
 }
 
 func registerProject(cwd string) error {

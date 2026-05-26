@@ -4,7 +4,7 @@
 # AI Agents
 .rulez/
 .claude/
-.agent/
+.agents/
 .codex/
 .gemini/
 .qwen/
@@ -46,3 +46,7 @@ tests/
 
 # vmem
 .vmem/
+
+.devflow/
+.devflow-archive/
+CONTEXT.md
