@@ -1,0 +1,19 @@
+version: 2
+
+builds:
+  - main: ./cmd/codegraph
+    binary: codegraph
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -X github.com/tk-425/Codegraph/internal/cli.Version={{.Version}}
+
+archives:
+  - formats: [tar.gz]
+    name_template: >-
+      codegraph_{{ .Version }}_{{ .Os }}_{{ .Arch }}
