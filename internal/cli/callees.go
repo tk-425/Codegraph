@@ -35,8 +35,20 @@ func init() {
 	rootCmd.AddCommand(calleesCmd)
 }
 
+type calleeRecord struct {
+	Name string `json:"name"`
+	Kind string `json:"kind"`
+	File string `json:"file"`
+	Line int    `json:"line"`
+}
+
 func runCallees(cmd *cobra.Command, args []string) error {
 	symbol := args[0]
+	if jsonOutputFlag {
+		cmd.SilenceUsage = true
+		cmd.SilenceErrors = true
+		return runCalleesJSON(cmd, symbol)
+	}
 
 	// Get current directory
 	cwd, err := os.Getwd()
@@ -95,4 +107,44 @@ func runCallees(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func runCalleesJSON(cmd *cobra.Command, symbol string) error {
+	out := cmd.OutOrStdout()
+	emitErr := func(code string, err error) error {
+		_ = EmitJSON(out, "callees", &symbol, []calleeRecord{}, []EnvelopeError{{Code: code, Message: err.Error()}})
+		return err
+	}
+
+	cwd, _, dbManager, code, err := openProject(false)
+	if err != nil {
+		return emitErr(code, err)
+	}
+	defer dbManager.Close()
+
+	var languages []string
+	if calleesLangFlag != "" {
+		languages = strings.Split(calleesLangFlag, ",")
+	}
+
+	callees, err := dbManager.GetCallees(symbol, languages)
+	if err != nil {
+		return emitErr("callees_lookup_failed", fmt.Errorf("failed to find callees: %w", err))
+	}
+
+	records := make([]calleeRecord, 0, len(callees))
+	for _, c := range callees {
+		relPath, rerr := filepath.Rel(cwd, c.CallFile)
+		if rerr != nil {
+			relPath = c.CallFile
+		}
+		records = append(records, calleeRecord{
+			Name: c.Name,
+			Kind: c.Kind,
+			File: relPath,
+			Line: c.CallLine,
+		})
+	}
+
+	return EmitJSON(out, "callees", &symbol, records, nil)
 }

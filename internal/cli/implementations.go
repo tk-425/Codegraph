@@ -32,8 +32,20 @@ func init() {
 	rootCmd.AddCommand(implementationsCmd)
 }
 
+type implementationRecord struct {
+	Name string `json:"name"`
+	Kind string `json:"kind"`
+	File string `json:"file"`
+	Line int    `json:"line"`
+}
+
 func runImplementations(cmd *cobra.Command, args []string) error {
 	interfaceName := args[0]
+	if jsonOutputFlag {
+		cmd.SilenceUsage = true
+		cmd.SilenceErrors = true
+		return runImplementationsJSON(cmd, interfaceName)
+	}
 
 	// Get current directory
 	cwd, err := os.Getwd()
@@ -147,4 +159,90 @@ func runImplementations(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func runImplementationsJSON(cmd *cobra.Command, interfaceName string) error {
+	out := cmd.OutOrStdout()
+	emitErr := func(code string, err error) error {
+		_ = EmitJSON(out, "implementations", &interfaceName, []implementationRecord{}, []EnvelopeError{{Code: code, Message: err.Error()}})
+		return err
+	}
+
+	cwd, cfg, dbManager, code, err := openProject(false)
+	if err != nil {
+		return emitErr(code, err)
+	}
+	defer dbManager.Close()
+
+	records := make([]implementationRecord, 0)
+
+	dbImpls, err := dbManager.GetImplementationsByName(interfaceName)
+	if err == nil {
+		for _, impl := range dbImpls {
+			relPath, rerr := filepath.Rel(cwd, impl.File)
+			if rerr != nil {
+				relPath = impl.File
+			}
+			records = append(records, implementationRecord{
+				Name: impl.Name,
+				Kind: impl.Kind,
+				File: relPath,
+				Line: impl.Line,
+			})
+		}
+	}
+
+	if len(records) > 0 {
+		return EmitJSON(out, "implementations", &interfaceName, records, nil)
+	}
+
+	// LSP fallback
+	var languages []string
+	if implementationsLangFlag != "" {
+		languages = strings.Split(implementationsLangFlag, ",")
+	}
+
+	symbols, err := dbManager.GetSymbolByName(interfaceName, languages)
+	if err != nil {
+		return emitErr("implementations_lookup_failed", fmt.Errorf("failed to find symbol: %w", err))
+	}
+	if len(symbols) == 0 {
+		return EmitJSON(out, "implementations", &interfaceName, records, nil)
+	}
+
+	rootURI := "file://" + cwd
+	lspManager := lsp.NewManager(cfg, rootURI)
+	defer lspManager.ShutdownAll()
+
+	ctx := context.Background()
+	for _, sym := range symbols {
+		if sym.Kind != "interface" && sym.Kind != "class" && sym.Kind != "struct" {
+			continue
+		}
+		client, cerr := lspManager.GetClient(ctx, sym.Language)
+		if cerr != nil {
+			continue
+		}
+		fileURI := "file://" + sym.File
+		pos := lsp.Position{Line: sym.Line - 1, Character: sym.Column}
+		impls, ierr := client.Implementation(ctx, fileURI, pos)
+		if ierr != nil {
+			continue
+		}
+		for _, impl := range impls {
+			implPath := strings.TrimPrefix(impl.URI, "file://")
+			relPath, rerr := filepath.Rel(cwd, implPath)
+			if rerr != nil {
+				relPath = implPath
+			}
+			records = append(records, implementationRecord{
+				Name: "",
+				Kind: "",
+				File: relPath,
+				Line: impl.Range.Start.Line + 1,
+			})
+		}
+	}
+
+	return EmitJSON(out, "implementations", &interfaceName, records, nil)
 }

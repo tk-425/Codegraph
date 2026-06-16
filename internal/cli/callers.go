@@ -36,8 +36,20 @@ func init() {
 	rootCmd.AddCommand(callersCmd)
 }
 
+type callerRecord struct {
+	Name string `json:"name"`
+	Kind string `json:"kind"`
+	File string `json:"file"`
+	Line int    `json:"line"`
+}
+
 func runCallers(cmd *cobra.Command, args []string) error {
 	symbol := args[0]
+	if jsonOutputFlag {
+		cmd.SilenceUsage = true
+		cmd.SilenceErrors = true
+		return runCallersJSON(cmd, symbol)
+	}
 
 	// Get current directory
 	cwd, err := os.Getwd()
@@ -96,6 +108,46 @@ func runCallers(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func runCallersJSON(cmd *cobra.Command, symbol string) error {
+	out := cmd.OutOrStdout()
+	emitErr := func(code string, err error) error {
+		_ = EmitJSON(out, "callers", &symbol, []callerRecord{}, []EnvelopeError{{Code: code, Message: err.Error()}})
+		return err
+	}
+
+	cwd, _, dbManager, code, err := openProject(false)
+	if err != nil {
+		return emitErr(code, err)
+	}
+	defer dbManager.Close()
+
+	var languages []string
+	if callersLangFlag != "" {
+		languages = strings.Split(callersLangFlag, ",")
+	}
+
+	callers, err := dbManager.GetCallers(symbol, languages)
+	if err != nil {
+		return emitErr("callers_lookup_failed", fmt.Errorf("failed to find callers: %w", err))
+	}
+
+	records := make([]callerRecord, 0, len(callers))
+	for _, c := range callers {
+		relPath, rerr := filepath.Rel(cwd, c.CallFile)
+		if rerr != nil {
+			relPath = c.CallFile
+		}
+		records = append(records, callerRecord{
+			Name: c.Name,
+			Kind: c.Kind,
+			File: relPath,
+			Line: c.CallLine,
+		})
+	}
+
+	return EmitJSON(out, "callers", &symbol, records, nil)
 }
 
 // getSourceLine reads a specific line from a file

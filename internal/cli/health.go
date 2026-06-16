@@ -25,7 +25,20 @@ func init() {
 	rootCmd.AddCommand(healthCmd)
 }
 
+type healthRecord struct {
+	Category string `json:"category"`
+	Name     string `json:"name"`
+	OK       bool   `json:"ok"`
+	Detail   string `json:"detail"`
+}
+
 func runHealth(cmd *cobra.Command, args []string) error {
+	if jsonOutputFlag {
+		cmd.SilenceUsage = true
+		cmd.SilenceErrors = true
+		return runHealthJSON(cmd)
+	}
+
 	fmt.Printf("🏥 %s\n\n", Bold("Checking codegraph health..."))
 
 	// Get current directory
@@ -96,4 +109,62 @@ func runHealth(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func runHealthJSON(cmd *cobra.Command) error {
+	out := cmd.OutOrStdout()
+	records := []healthRecord{}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		_ = EmitJSON(out, "health", nil, records, []EnvelopeError{{Code: "cwd_failed", Message: err.Error()}})
+		return err
+	}
+
+	codegraphDir := filepath.Join(cwd, ".codegraph")
+	if _, err := os.Stat(codegraphDir); os.IsNotExist(err) {
+		records = append(records, healthRecord{Category: "initialized", Name: "initialized", OK: false, Detail: "codegraph not initialized. Run 'codegraph init' first"})
+		return EmitJSON(out, "health", nil, records, nil)
+	}
+	records = append(records, healthRecord{Category: "initialized", Name: "initialized", OK: true, Detail: ".codegraph/ directory exists"})
+
+	cfg, err := config.Load(cwd)
+	if err != nil {
+		records = append(records, healthRecord{Category: "config", Name: "config", OK: false, Detail: err.Error()})
+		return EmitJSON(out, "health", nil, records, nil)
+	}
+	records = append(records, healthRecord{Category: "config", Name: "config", OK: true, Detail: "config.toml loaded"})
+
+	dbPath := cfg.GetDatabasePath(cwd)
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		records = append(records, healthRecord{Category: "database", Name: "database", OK: false, Detail: "not found"})
+		return EmitJSON(out, "health", nil, records, nil)
+	}
+
+	dbManager, err := db.NewManager(dbPath)
+	if err != nil {
+		records = append(records, healthRecord{Category: "database", Name: "database", OK: false, Detail: err.Error()})
+		return EmitJSON(out, "health", nil, records, nil)
+	}
+	defer dbManager.Close()
+
+	stats, err := dbManager.GetStats()
+	if err != nil {
+		records = append(records, healthRecord{Category: "stats", Name: "stats", OK: false, Detail: err.Error()})
+		return EmitJSON(out, "health", nil, records, nil)
+	}
+	records = append(records, healthRecord{Category: "database", Name: "database", OK: true, Detail: "accessible"})
+	records = append(records, healthRecord{Category: "stats", Name: "symbols", OK: true, Detail: fmt.Sprintf("%d", stats.SymbolCount)})
+	records = append(records, healthRecord{Category: "stats", Name: "calls", OK: true, Detail: fmt.Sprintf("%d", stats.CallCount)})
+	records = append(records, healthRecord{Category: "stats", Name: "files", OK: true, Detail: fmt.Sprintf("%d", stats.FileCount)})
+
+	for lang, lspCfg := range cfg.LSP {
+		if _, err := exec.LookPath(lspCfg.Command); err != nil {
+			records = append(records, healthRecord{Category: "lsp", Name: lang, OK: false, Detail: lspCfg.Command + " not found"})
+		} else {
+			records = append(records, healthRecord{Category: "lsp", Name: lang, OK: true, Detail: lspCfg.Command})
+		}
+	}
+
+	return EmitJSON(out, "health", nil, records, nil)
 }
