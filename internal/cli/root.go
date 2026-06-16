@@ -17,11 +17,15 @@ func Execute() error {
 }
 
 func init() {
+	rootCmd.PersistentFlags().BoolVar(&jsonOutputFlag, "json", false, "Emit machine-readable JSON output (read-only query commands only)")
+
 	defaultHelp := rootCmd.HelpFunc()
 	rootCmd.SetHelpFunc(func(cmd *cobra.Command, args []string) {
 		out := cmd.OutOrStdout()
-		printBanner(out)
-		fmt.Fprintln(out)
+		if !jsonOutputFlag {
+			printBanner(out)
+			fmt.Fprintln(out)
+		}
 		defaultHelp(cmd, args)
 	})
 }

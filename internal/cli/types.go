@@ -32,10 +32,27 @@ func init() {
 	rootCmd.AddCommand(typesCmd)
 }
 
+type typeRecord struct {
+	Name         string `json:"name"`
+	Kind         string `json:"kind"`
+	File         string `json:"file"`
+	Line         int    `json:"line"`
+	Relationship string `json:"relationship"`
+}
+
 func runTypes(cmd *cobra.Command, args []string) error {
 	symbol := args[0]
+	if jsonOutputFlag {
+		cmd.SilenceUsage = true
+		cmd.SilenceErrors = true
+		err := fmt.Errorf("types command not yet implemented")
+		_ = EmitJSON(cmd.OutOrStdout(), "types", &symbol, []typeRecord{},
+			[]EnvelopeError{{Code: "not_implemented", Message: err.Error()}})
+		return err
+	}
+
 	fmt.Printf("🔗 Finding type hierarchy for: %s\n", symbol)
-	
+
 	if typesSupertypesFlag {
 		fmt.Println("   Direction: supertypes")
 	}
@@ -48,7 +65,7 @@ func runTypes(cmd *cobra.Command, args []string) error {
 	if typesLangFlag != "" {
 		fmt.Printf("   Languages: %s\n", typesLangFlag)
 	}
-	
+
 	// TODO: Implement types logic
 	fmt.Println("\n⚠️  Not yet implemented")
 	return nil

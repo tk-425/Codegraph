@@ -21,7 +21,21 @@ func init() {
 	rootCmd.AddCommand(projectsCmd)
 }
 
+type projectRecord struct {
+	Name          string    `json:"name"`
+	Path          string    `json:"path"`
+	Status        string    `json:"status"`
+	LastSeen      time.Time `json:"last_seen"`
+	InitializedAt time.Time `json:"initialized_at"`
+}
+
 func runProjects(cmd *cobra.Command, args []string) error {
+	if jsonOutputFlag {
+		cmd.SilenceUsage = true
+		cmd.SilenceErrors = true
+		return runProjectsJSON(cmd)
+	}
+
 	regPath, err := registry.DefaultRegistryPath()
 	if err != nil {
 		return err
@@ -53,6 +67,50 @@ func runProjects(cmd *cobra.Command, args []string) error {
 	}
 	w.Flush()
 	return nil
+}
+
+func runProjectsJSON(cmd *cobra.Command) error {
+	out := cmd.OutOrStdout()
+	emitErr := func(code string, err error) error {
+		_ = EmitJSON(out, "projects", nil, []projectRecord{}, []EnvelopeError{{Code: code, Message: err.Error()}})
+		return err
+	}
+
+	regPath, err := registry.DefaultRegistryPath()
+	if err != nil {
+		return emitErr("registry_path_failed", err)
+	}
+	reg, err := registry.Load(regPath)
+	if err != nil {
+		return emitErr("registry_load_failed", err)
+	}
+
+	records := make([]projectRecord, 0, len(reg.Projects))
+	for path, proj := range reg.Projects {
+		records = append(records, projectRecord{
+			Name:          proj.Name,
+			Path:          path,
+			Status:        getProjectStatusCode(path),
+			LastSeen:      proj.LastSeen,
+			InitializedAt: proj.InitializedAt,
+		})
+	}
+
+	return EmitJSON(out, "projects", nil, records, nil)
+}
+
+func getProjectStatusCode(path string) string {
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return "missing"
+	}
+	if !info.IsDir() {
+		return "invalid"
+	}
+	if _, err := os.Stat(filepath.Join(path, ".codegraph")); os.IsNotExist(err) {
+		return "uninitialized"
+	}
+	return "active"
 }
 
 func getProjectStatus(path string) string {

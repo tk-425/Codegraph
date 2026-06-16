@@ -30,8 +30,22 @@ func init() {
 	rootCmd.AddCommand(signatureCmd)
 }
 
+type signatureRecord struct {
+	Name      string `json:"name"`
+	Kind      string `json:"kind"`
+	File      string `json:"file"`
+	Line      int    `json:"line"`
+	Language  string `json:"language"`
+	Signature string `json:"signature"`
+}
+
 func runSignature(cmd *cobra.Command, args []string) error {
 	symbol := args[0]
+	if jsonOutputFlag {
+		cmd.SilenceUsage = true
+		cmd.SilenceErrors = true
+		return runSignatureJSON(cmd, symbol)
+	}
 
 	// Get current directory
 	cwd, err := os.Getwd()
@@ -109,6 +123,51 @@ func runSignature(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func runSignatureJSON(cmd *cobra.Command, symbol string) error {
+	out := cmd.OutOrStdout()
+	emitErr := func(code string, err error) error {
+		_ = EmitJSON(out, "signature", &symbol, []signatureRecord{}, []EnvelopeError{{Code: code, Message: err.Error()}})
+		return err
+	}
+
+	cwd, _, dbManager, code, err := openProject(false)
+	if err != nil {
+		return emitErr(code, err)
+	}
+	defer dbManager.Close()
+
+	var languages []string
+	if signatureLangFlag != "" {
+		languages = strings.Split(signatureLangFlag, ",")
+	}
+
+	symbols, err := dbManager.GetSymbolByName(symbol, languages)
+	if err != nil {
+		return emitErr("signature_lookup_failed", fmt.Errorf("failed to find symbol: %w", err))
+	}
+
+	records := make([]signatureRecord, 0, len(symbols))
+	for _, sym := range symbols {
+		if sym.Kind != "function" && sym.Kind != "method" && sym.Kind != "variable" {
+			continue
+		}
+		relPath, rerr := filepath.Rel(cwd, sym.File)
+		if rerr != nil {
+			relPath = sym.File
+		}
+		records = append(records, signatureRecord{
+			Name:      sym.Name,
+			Kind:      sym.Kind,
+			File:      relPath,
+			Line:      sym.Line,
+			Language:  sym.Language,
+			Signature: strings.TrimSpace(sym.Signature),
+		})
+	}
+
+	return EmitJSON(out, "signature", &symbol, records, nil)
 }
 
 // colorizeSignature adds colors to a function signature
