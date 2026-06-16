@@ -45,9 +45,6 @@ dist/
 # Test files (language adapter testing)
 tests/
 
-# vmem
-.vmem/
-
 .devflow/
 .devflow-archive/
 CONTEXT.md
