@@ -9,6 +9,7 @@
 .gemini/
 .qwen/
 .opencode/
+.pi/
 .mcp.json
 opencode.json
 CLAUDE.md
