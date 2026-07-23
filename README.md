@@ -46,7 +46,7 @@ CodeGraph works best with Language Servers installed for precise call graphs and
 
 - **Go**: `go install golang.org/x/tools/gopls@latest`
 - **Python**: `pip install pyright`
-- **TypeScript**: `npm install -g typescript-language-server typescript`
+- **TypeScript**: install TypeScript in each project (`npm install -D typescript`). For older projects, also install `typescript-language-server` (`npm install -g typescript-language-server`). TypeScript 7+ projects use the local native LSP (`tsc --lsp --stdio`); older projects use `typescript-language-server --stdio`. Explicit `.codegraph/config.toml` commands override automatic selection.
 - **Rust**: `rustup component add rust-analyzer`
 - **Java**: `brew install jdtls` (macOS) or via [official setup](https://github.com/eclipse/eclipse.jdt.ls#installation)
 - **Swift**: Included with Xcode (`sourcekit-lsp`)
