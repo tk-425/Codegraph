@@ -48,6 +48,13 @@ codegraph build                  # Incremental update
 codegraph build --force          # Full rebuild
 ```
 
+### TypeScript LSP Setup
+
+- TypeScript 7+ projects use the project-local native LSP: `tsc --lsp --stdio`.
+- Older TypeScript projects use `typescript-language-server --stdio`.
+- Install TypeScript locally with `npm install -D typescript`; older projects may also need `npm install -g typescript-language-server`.
+- Explicit `.codegraph/config.toml` LSP commands override automatic server selection.
+
 ### Code Navigation (Auto-Invoked)
 
 **Find Symbols**
@@ -155,16 +162,16 @@ codegraph callees authenticate            # Trace downstream
 
 ## Language Support
 
-Go, Python, TypeScript, JavaScript, Java, Rust, Swift, OCaml (with LSP integration for most)
+Go, Python, TypeScript, JavaScript, Java, Rust, Swift, OCaml (with LSP integration for most). TypeScript 7+ uses the native `tsc --lsp --stdio` server; older TypeScript versions use `typescript-language-server --stdio`.
 
 ## Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
 | Search not finding symbols | Run `codegraph health` to check status, then `codegraph build` |
-| Stale or missing results | Run `codegraph build` (incremental) or `codegraph build --force` (full) |
+| Stale or missing results | Run `codegraph build` (incremental) or `codegraph build --force` (full rebuild); deleting `.codegraph/` is usually unnecessary |
 | Missing call relationships | Run `codegraph build --force` for full rebuild |
-| LSP server errors | Run `codegraph health` to see which servers are missing |
+| LSP server errors | Run `codegraph health`, confirm the TypeScript version/server setup, then retry `codegraph build --force` |
 
 ## Best Practices
 
