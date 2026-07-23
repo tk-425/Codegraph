@@ -13,10 +13,25 @@ import (
 type Manager struct {
 	cfg     *config.Config
 	rootURI string
-	
+
 	mu      sync.Mutex
 	clients map[string]*Client // language -> client
 }
+
+const nativeTypeScriptMaxAttempts = 3
+
+var (
+	newLSPClient = NewClient
+	initializeLSP = func(ctx context.Context, client *Client) error {
+		_, err := client.Initialize(ctx)
+		return err
+	}
+	shutdownLSP = func(ctx context.Context, client *Client) error {
+		return client.Shutdown(ctx)
+	}
+	sleepBeforeRetry = time.Sleep
+	cleanupFailedLSP = cleanupFailedClient
+)
 
 // NewManager creates a new LSP manager
 func NewManager(cfg *config.Config, rootURI string) *Manager {
@@ -37,32 +52,67 @@ func (m *Manager) GetClient(ctx context.Context, language string) (*Client, erro
 		return client, nil
 	}
 
-	// Get LSP config for language
+	// Resolve the configured server. TypeScript and TypeScript React may use
+	// the project-local native server when automatic configuration is active.
 	lspConfig, ok := m.cfg.LSP[language]
 	if !ok {
 		return nil, fmt.Errorf("no LSP configuration for language: %s", language)
 	}
-
-	// Create new client
-	client, err := NewClient(lspConfig.Command, lspConfig.Args, m.rootURI, language)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create LSP client for %s: %w", language, err)
+	server := typeScriptServer{command: lspConfig.Command, args: lspConfig.Args}
+	if language == "typescript" || language == "typescriptreact" {
+		resolved, resolveErr := resolveTypeScriptServer(m.cfg, projectRootFromURI(m.rootURI), language)
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		server = resolved
 	}
 
-	// Initialize with timeout
-	initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
+	attempts := 1
+	if server.native {
+		attempts = nativeTypeScriptMaxAttempts
+	}
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		client, err := newLSPClient(server.command, server.args, m.rootURI, language)
+		if err == nil {
+			initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			err = initializeLSP(initCtx, client)
+			cancel()
+		}
+		if err == nil {
+			m.clients[language] = client
+			return client, nil
+		}
 
-	if _, err := client.Initialize(initCtx); err != nil {
-		client.Shutdown(context.Background())
-		return nil, fmt.Errorf("failed to initialize LSP for %s: %w", language, err)
+		lastErr = err
+		if client != nil {
+			cleanupFailedLSP(client)
+		}
+		if attempt < attempts {
+			sleepBeforeRetry(time.Duration(attempt) * 100 * time.Millisecond)
+		}
 	}
 
-	m.clients[language] = client
-	return client, nil
+	return nil, fmt.Errorf("failed to initialize LSP for %s: %w", language, lastErr)
 }
 
 // ShutdownAll shuts down all LSP servers
+func cleanupFailedClient(client *Client) {
+	if client.initialized {
+		_ = shutdownLSP(context.Background(), client)
+		return
+	}
+	if client.stdin != nil {
+		_ = client.stdin.Close()
+	}
+	if client.stdout != nil {
+		_ = client.stdout.Close()
+	}
+	if client.cmd != nil {
+		_ = client.cmd.Wait()
+	}
+}
+
 func (m *Manager) ShutdownAll() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
