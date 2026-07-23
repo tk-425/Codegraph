@@ -46,6 +46,15 @@ type Response struct {
 	Error   *ResponseError  `json:"error,omitempty"`
 }
 
+type wireMessage struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id,omitempty"`
+	Method  string          `json:"method,omitempty"`
+	Params  json.RawMessage `json:"params,omitempty"`
+	Result  json.RawMessage `json:"result,omitempty"`
+	Error   *ResponseError  `json:"error,omitempty"`
+}
+
 // ResponseError represents a JSON-RPC 2.0 error
 type ResponseError struct {
 	Code    int    `json:"code"`
@@ -312,11 +321,20 @@ func (c *Client) readResponses() {
 			return
 		}
 
-		// Parse response
-		var resp Response
-		if err := json.Unmarshal(body, &resp); err != nil {
+		var message wireMessage
+		if err := json.Unmarshal(body, &message); err != nil {
 			continue
 		}
+		if message.Method != "" {
+			_ = c.respondToServerRequest(message.ID, message.Method)
+			continue
+		}
+
+		var id int64
+		if err := json.Unmarshal(message.ID, &id); err != nil {
+			continue
+		}
+		resp := Response{JSONRPC: message.JSONRPC, ID: id, Result: message.Result, Error: message.Error}
 
 		// Dispatch to waiting caller
 		if resp.ID > 0 {
@@ -327,6 +345,40 @@ func (c *Client) readResponses() {
 			c.mu.Unlock()
 		}
 	}
+}
+
+func (c *Client) respondToServerRequest(id json.RawMessage, method string) error {
+	var result any
+	var responseErr *ResponseError
+	switch method {
+	case "client/registerCapability", "client/unregisterCapability":
+		result = json.RawMessage("null")
+	case "workspace/configuration":
+		result = []any{}
+	case "workspace/workspaceFolders":
+		result = []map[string]string{{"uri": c.RootURI, "name": "workspace"}}
+	default:
+		responseErr = &ResponseError{Code: -32601, Message: "method not found"}
+	}
+
+	response := struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Result  any             `json:"result,omitempty"`
+		Error   *ResponseError  `json:"error,omitempty"`
+	}{JSONRPC: "2.0", ID: id, Result: result, Error: responseErr}
+	data, err := json.Marshal(response)
+	if err != nil {
+		return err
+	}
+	header := fmt.Sprintf("Content-Length: %d\r\n\r\n", len(data))
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, err := io.WriteString(c.stdin, header); err != nil {
+		return err
+	}
+	_, err = c.stdin.Write(data)
+	return err
 }
 
 // DocumentSymbols requests symbols from a document
