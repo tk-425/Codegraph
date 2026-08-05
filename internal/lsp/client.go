@@ -202,16 +202,27 @@ func (c *Client) Shutdown(ctx context.Context) error {
 	// Send shutdown request
 	var result any
 	if err := c.Call(ctx, "shutdown", nil, &result); err != nil {
-		// Ignore errors on shutdown
+		// Server may already be dead or unresponsive; nothing to do.
 	}
 
 	// Send exit notification
 	c.Notify("exit", nil)
 
-	// Close pipes and wait for process
+	// Wait for process to exit before closing pipes. This allows the server
+	// to send final notifications (e.g. window/logMessage during cleanup)
+	// without hitting "Connection is closed" errors.
+	done := make(chan struct{})
+	go func() {
+		c.cmd.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+
 	c.stdin.Close()
-	c.stdout.Close()
-	c.cmd.Wait()
+	_ = c.stdout.Close()
 
 	return nil
 }
@@ -326,7 +337,14 @@ func (c *Client) readResponses() {
 			continue
 		}
 		if message.Method != "" {
-			_ = c.respondToServerRequest(message.ID, message.Method)
+			// Only respond to server requests (have an ID), not notifications.
+			// Notifications have no id field and expect no response; sending a
+			// spurious error response with "id":null can confuse servers like
+			// rust-analyzer, causing "malformed LSP payload" deserialization
+			// errors and panics.
+			if len(message.ID) > 0 && string(message.ID) != "null" {
+				_ = c.respondToServerRequest(message.ID, message.Method)
+			}
 			continue
 		}
 
