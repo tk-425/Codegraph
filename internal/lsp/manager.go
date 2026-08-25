@@ -14,14 +14,15 @@ type Manager struct {
 	cfg     *config.Config
 	rootURI string
 
-	mu      sync.Mutex
-	clients map[string]*Client // language -> client
+	mu          sync.Mutex
+	clients     map[string]*Client // language -> client
+	diagnostics map[string]LSPDiagnostic
 }
 
 const nativeTypeScriptMaxAttempts = 3
 
 var (
-	newLSPClient = NewClient
+	newLSPClient  = NewClient
 	initializeLSP = func(ctx context.Context, client *Client) error {
 		_, err := client.Initialize(ctx)
 		return err
@@ -36,9 +37,10 @@ var (
 // NewManager creates a new LSP manager
 func NewManager(cfg *config.Config, rootURI string) *Manager {
 	return &Manager{
-		cfg:     cfg,
-		rootURI: rootURI,
-		clients: make(map[string]*Client),
+		cfg:         cfg,
+		rootURI:     rootURI,
+		clients:     make(map[string]*Client),
+		diagnostics: make(map[string]LSPDiagnostic),
 	}
 }
 
@@ -56,12 +58,15 @@ func (m *Manager) GetClient(ctx context.Context, language string) (*Client, erro
 	// the project-local native server when automatic configuration is active.
 	lspConfig, ok := m.cfg.LSP[language]
 	if !ok {
-		return nil, fmt.Errorf("no LSP configuration for language: %s", language)
+		err := fmt.Errorf("no LSP configuration for language: %s", language)
+		m.diagnostics[language] = newDiagnostic(language, "", projectRootFromURI(m.rootURI), err, false)
+		return nil, err
 	}
 	server := typeScriptServer{command: lspConfig.Command, args: lspConfig.Args}
 	if language == "typescript" || language == "typescriptreact" {
 		resolved, resolveErr := resolveTypeScriptServer(m.cfg, projectRootFromURI(m.rootURI), language)
 		if resolveErr != nil {
+			m.diagnostics[language] = newDiagnostic(language, server.command, projectRootFromURI(m.rootURI), resolveErr, m.cfg.IsExplicitLSPOverride(language))
 			return nil, resolveErr
 		}
 		server = resolved
@@ -93,7 +98,20 @@ func (m *Manager) GetClient(ctx context.Context, language string) (*Client, erro
 		}
 	}
 
+	diagnostic := newDiagnostic(language, server.command, projectRootFromURI(m.rootURI), lastErr, m.cfg.IsExplicitLSPOverride(language))
+	m.diagnostics[language] = diagnostic
 	return nil, fmt.Errorf("failed to initialize LSP for %s: %w", language, lastErr)
+}
+
+// Diagnostics returns one diagnostic per affected language.
+func (m *Manager) Diagnostics() []LSPDiagnostic {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]LSPDiagnostic, 0, len(m.diagnostics))
+	for _, diagnostic := range m.diagnostics {
+		out = append(out, diagnostic)
+	}
+	return out
 }
 
 // ShutdownAll shuts down all LSP servers

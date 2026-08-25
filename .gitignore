@@ -1,21 +1,32 @@
-# docs
+# Agent config
+.agents/
+.claude/
+.codex/
+.opencode/
+.pi/
+AGENTS.md
+CLAUDE.md
+
+# Docs
 .docs/
+CONTEXT.md
+
+# Tool output
+graphify-out/
+.devflow/
+.devflow-archive/
+
+# Tool config
+.mcp.json
+opencode.json
+.graphifyignore
+# BEGIN MCPKIT
+# mcpkit generated local MCP wrappers
+.mcpkit/
+# END MCPKIT
 
 # AI Agents
 .rulez/
-.claude/
-.agents/
-.codex/
-.gemini/
-.qwen/
-.opencode/
-.pi/
-.mcp.json
-opencode.json
-CLAUDE.md
-GEMINI.md
-QWEN.md
-AGENTS.md
 
 # Code Graph Data
 .codegraph/
@@ -38,21 +49,20 @@ coverage.html
 dist/
 /codegraph
 
-# System/Misc
-.DS_Store
-*.log
+# Environment
 .env
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
 
 # Test files (language adapter testing)
 tests/
 
-.devflow/
-.devflow-archive/
-CONTEXT.md
-
-# BEGIN MCPKIT
-# mcpkit generated local MCP wrappers
-.mcpkit/
-# END MCPKIT
-
+# Firecrawl
 .firecrawl/
+
+.pipeline/
+.pipeline-archive/

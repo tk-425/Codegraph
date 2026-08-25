@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/tk-425/Codegraph/internal/lsp"
 	"github.com/tk-425/Codegraph/internal/registry"
 )
 
@@ -25,6 +26,16 @@ func assertQueryNull(t *testing.T, env map[string]json.RawMessage) {
 	t.Helper()
 	if string(env["query"]) != "null" {
 		t.Errorf("query raw = %s, want null", string(env["query"]))
+	}
+}
+
+func TestBuildDiagnosticRecordsPreserveGuidanceFields(t *testing.T) {
+	records := buildDiagnosticRecords([]lsp.LSPDiagnostic{{
+		Language: "typescript", Executable: "typescript-language-server", Category: lsp.MissingExecutable,
+		Reason: "not found", Guidance: &lsp.InstallationGuidance{Command: "pnpm add -g typescript-language-server typescript", Documentation: "https://example.test/lsp"},
+	}})
+	if len(records) != 1 || records[0].Language != "typescript" || records[0].Category != string(lsp.MissingExecutable) || records[0].Command == "" || records[0].DocumentationURL == "" {
+		t.Fatalf("records = %+v", records)
 	}
 }
 
