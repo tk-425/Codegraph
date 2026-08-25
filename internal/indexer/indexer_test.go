@@ -108,4 +108,8 @@ func TestIndexProjectFallsBackToTreeSitterWhenLSPFails(t *testing.T) {
 	if meta == nil {
 		t.Fatal("expected Tree-sitter fallback to record file metadata")
 	}
+	diagnostics := indexer.Diagnostics()
+	if len(diagnostics) != 1 || diagnostics[0].Language != "typescript" {
+		t.Fatalf("diagnostics = %+v, want one typescript diagnostic", diagnostics)
+	}
 }

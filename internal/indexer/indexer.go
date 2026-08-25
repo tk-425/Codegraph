@@ -16,11 +16,12 @@ import (
 
 // Indexer handles symbol extraction and storage
 type Indexer struct {
-	cfg      *config.Config
-	db       *db.Manager
-	lsp      *lsp.Manager
-	rootPath string
-	rootURI  string
+	cfg         *config.Config
+	db          *db.Manager
+	lsp         *lsp.Manager
+	rootPath    string
+	rootURI     string
+	diagnostics []lsp.LSPDiagnostic
 }
 
 // NewIndexer creates a new indexer
@@ -29,11 +30,12 @@ func NewIndexer(cfg *config.Config, dbManager *db.Manager, rootPath string) *Ind
 	rootURI := "file://" + absPath
 
 	return &Indexer{
-		cfg:      cfg,
-		db:       dbManager,
-		lsp:      lsp.NewManager(cfg, rootURI),
-		rootPath: absPath,
-		rootURI:  rootURI,
+		cfg:         cfg,
+		db:          dbManager,
+		lsp:         lsp.NewManager(cfg, rootURI),
+		rootPath:    absPath,
+		rootURI:     rootURI,
+		diagnostics: nil,
 	}
 }
 
@@ -62,9 +64,7 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 		// Get LSP client for this language
 		client, err := i.lsp.GetClient(ctx, language)
 		// If err != nil, client is nil. Proceed to fallback.
-		if err != nil {
-			fmt.Printf("   ⚠️  No LSP for %s (will use tree-sitter): %v\n", language, err)
-		}
+		_ = err // LSP failures are recorded by the manager; indexing continues with fallback.
 
 		// Some LSP servers need time to analyze the project after initialization
 		switch language {
@@ -189,12 +189,20 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 	}
 	fmt.Printf("   Found %d type relationships\n", totalHierarchy)
 
+	// Preserve one diagnostic per language for the build boundary.
+	i.diagnostics = i.lsp.Diagnostics()
+
 	// Shutdown LSP servers
 	i.lsp.ShutdownAll()
 
 	fmt.Printf("✅ Indexed %d files, skipped %d unchanged, %d symbols, %d calls, %d type relations\n",
 		indexedFiles, skippedFiles, totalSymbols, totalCalls, totalHierarchy)
 	return nil
+}
+
+// Diagnostics returns the non-fatal LSP diagnostics collected during indexing.
+func (i *Indexer) Diagnostics() []lsp.LSPDiagnostic {
+	return append([]lsp.LSPDiagnostic(nil), i.diagnostics...)
 }
 
 // shouldSkipFile checks if file is unchanged since last index

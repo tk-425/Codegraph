@@ -127,6 +127,28 @@ func Save(projectRoot string, cfg *Config) error {
 }
 
 // GetDatabasePath returns the absolute path to the database
+// IsExplicitLSPOverride reports whether a language differs from its built-in server definition.
+func (c *Config) IsExplicitLSPOverride(language string) bool {
+	configured, ok := c.LSP[language]
+	if !ok {
+		return false
+	}
+	defaults := DefaultConfig().LSP
+	baseline, ok := defaults[language]
+	if !ok {
+		return true
+	}
+	if configured.Command != baseline.Command || len(configured.Args) != len(baseline.Args) {
+		return true
+	}
+	for i := range configured.Args {
+		if configured.Args[i] != baseline.Args[i] {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Config) GetDatabasePath(projectRoot string) string {
 	if filepath.IsAbs(c.Database.Path) {
 		return c.Database.Path
