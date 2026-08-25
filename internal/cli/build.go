@@ -11,9 +11,33 @@ import (
 	"github.com/tk-425/Codegraph/internal/config"
 	"github.com/tk-425/Codegraph/internal/db"
 	"github.com/tk-425/Codegraph/internal/indexer"
+	"github.com/tk-425/Codegraph/internal/lsp"
 )
 
 var forceFlag bool
+
+type buildDiagnosticRecord struct {
+	Language         string `json:"language"`
+	Executable       string `json:"executable"`
+	Category         string `json:"category"`
+	Reason           string `json:"reason"`
+	Command          string `json:"command,omitempty"`
+	DocumentationURL string `json:"documentation_url,omitempty"`
+	ExplicitOverride bool   `json:"explicit_override"`
+}
+
+func buildDiagnosticRecords(diagnostics []lsp.LSPDiagnostic) []buildDiagnosticRecord {
+	records := make([]buildDiagnosticRecord, 0, len(diagnostics))
+	for _, diagnostic := range diagnostics {
+		record := buildDiagnosticRecord{Language: diagnostic.Language, Executable: diagnostic.Executable, Category: string(diagnostic.Category), Reason: diagnostic.Reason, ExplicitOverride: diagnostic.Overridden}
+		if diagnostic.Guidance != nil {
+			record.Command = diagnostic.Guidance.Command
+			record.DocumentationURL = diagnostic.Guidance.Documentation
+		}
+		records = append(records, record)
+	}
+	return records
+}
 
 var buildCmd = &cobra.Command{
 	Use:   "build",
@@ -35,12 +59,14 @@ func init() {
 }
 
 func runBuild(cmd *cobra.Command, args []string) error {
-	printBanner(cmd.OutOrStdout())
-	fmt.Println()
+	if !jsonOutputFlag {
+		printBanner(cmd.OutOrStdout())
+		fmt.Println()
+	}
 
-	if forceFlag {
+	if forceFlag && !jsonOutputFlag {
 		fmt.Printf("🔄 %s\n", Bold("Force rebuilding database..."))
-	} else {
+	} else if !jsonOutputFlag {
 		fmt.Printf("🔨 %s\n", Bold("Building database..."))
 	}
 
@@ -75,11 +101,15 @@ func runBuild(cmd *cobra.Command, args []string) error {
 
 	languages := indexer.DetectedLanguages(files)
 	if len(languages) == 0 {
+		if jsonOutputFlag {
+			return EmitJSON(cmd.OutOrStdout(), "build", nil, []buildDiagnosticRecord{}, nil)
+		}
 		fmt.Printf("⚠️  %s\n", Warning("No supported source files found"))
 		return nil
 	}
-	fmt.Printf("🔍 Found %s files in %s languages (%s)\n",
-		Info(len(files)), Info(len(languages)), Keyword(strings.Join(languages, ", ")))
+	if !jsonOutputFlag {
+		fmt.Printf("🔍 Found %s files in %s languages (%s)\n", Info(len(files)), Info(len(languages)), Keyword(strings.Join(languages, ", ")))
+	}
 
 	// Open database
 	dbPath := cfg.GetDatabasePath(cwd)
@@ -102,5 +132,21 @@ func runBuild(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("indexing failed: %w", err)
 	}
 
+	diagnostics := idx.Diagnostics()
+	if jsonOutputFlag {
+		return EmitJSON(cmd.OutOrStdout(), "build", nil, buildDiagnosticRecords(diagnostics), nil)
+	}
+	for _, diagnostic := range diagnostics {
+		fmt.Printf("⚠️  %s LSP unavailable (%s): %s\n", diagnostic.Language, diagnostic.Executable, diagnostic.Reason)
+		if diagnostic.Guidance == nil {
+			continue
+		}
+		if diagnostic.Guidance.Command != "" {
+			fmt.Printf("   Installation guidance: %s\n", diagnostic.Guidance.Command)
+		}
+		if diagnostic.Guidance.Documentation != "" {
+			fmt.Printf("   Documentation: %s\n", diagnostic.Guidance.Documentation)
+		}
+	}
 	return nil
 }
