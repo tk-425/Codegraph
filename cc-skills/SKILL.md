@@ -46,7 +46,14 @@ codegraph init
 ```bash
 codegraph build                  # Incremental update
 codegraph build --force          # Full rebuild
+codegraph build --lsp-stderr     # Also forward raw language-server stderr
 ```
+
+Language-server standard error is discarded by default. `--lsp-stderr` is a
+persistent flag available on every command, and forwards the server's raw output
+unchanged. Setting `CODEGRAPH_LSP_STDERR` to any non-empty value enables the same
+behavior for callers that do not construct the command line, such as CI pipelines
+and agent harnesses. When both are present, the flag decides.
 
 ### TypeScript LSP Setup
 
@@ -171,7 +178,7 @@ Go, Python, TypeScript, JavaScript, Java, Rust, Swift, OCaml (with LSP integrati
 | Search not finding symbols | Run `codegraph health` to check status, then `codegraph build` |
 | Stale or missing results | Run `codegraph build` (incremental) or `codegraph build --force` (full rebuild); deleting `.codegraph/` is usually unnecessary |
 | Missing call relationships | Run `codegraph build --force` for full rebuild |
-| LSP server errors | Run `codegraph health`, confirm the TypeScript version/server setup, then retry `codegraph build --force` |
+| LSP server errors | A `server_log` diagnostic means the server started and reported a problem — indexing still used it, so no installation is needed. A `missing_executable` or `initialization_failure` diagnostic means the server never started; run `codegraph health` and follow the installation guidance. For the server's raw output, rerun with `--lsp-stderr` (or set `CODEGRAPH_LSP_STDERR`). |
 
 ## Best Practices
 

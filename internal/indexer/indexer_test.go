@@ -1,9 +1,11 @@
 package indexer
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -111,5 +113,40 @@ func TestIndexProjectFallsBackToTreeSitterWhenLSPFails(t *testing.T) {
 	diagnostics := indexer.Diagnostics()
 	if len(diagnostics) != 1 || diagnostics[0].Language != "typescript" {
 		t.Fatalf("diagnostics = %+v, want one typescript diagnostic", diagnostics)
+	}
+}
+
+func TestIndexProjectSendsProgressToTheInjectedWriter(t *testing.T) {
+	root := t.TempDir()
+	filePath := filepath.Join(root, "example.ts")
+	if err := os.WriteFile(filePath, []byte("function greet(name: string) { return name }\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.LSP["typescript"] = config.LSPConfig{Command: "missing-typescript-lsp", Args: []string{"--stdio"}}
+	database, err := db.NewManager(filepath.Join(root, "graph.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+
+	var progress bytes.Buffer
+	indexer := NewIndexer(cfg, database, root)
+	indexer.SetProgressWriter(&progress)
+	if err := indexer.IndexProject(context.Background(), []FileInfo{{Path: filePath, RelPath: "example.ts", Language: "typescript"}}, true); err != nil {
+		t.Fatal(err)
+	}
+
+	// Progress must reach the injected writer, never process stdout directly:
+	// that is what lets the --json path discard it and emit a clean envelope.
+	if progress.Len() == 0 {
+		t.Fatal("injected progress writer received nothing, so progress still goes to stdout")
+	}
+	if !strings.Contains(progress.String(), "Indexed 1 files") {
+		t.Errorf("progress writer received %q, want the indexing summary", progress.String())
 	}
 }

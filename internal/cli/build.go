@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +21,7 @@ type buildDiagnosticRecord struct {
 	Language         string `json:"language"`
 	Executable       string `json:"executable"`
 	Category         string `json:"category"`
+	Severity         string `json:"severity"`
 	Reason           string `json:"reason"`
 	Command          string `json:"command,omitempty"`
 	DocumentationURL string `json:"documentation_url,omitempty"`
@@ -29,7 +31,7 @@ type buildDiagnosticRecord struct {
 func buildDiagnosticRecords(diagnostics []lsp.LSPDiagnostic) []buildDiagnosticRecord {
 	records := make([]buildDiagnosticRecord, 0, len(diagnostics))
 	for _, diagnostic := range diagnostics {
-		record := buildDiagnosticRecord{Language: diagnostic.Language, Executable: diagnostic.Executable, Category: string(diagnostic.Category), Reason: diagnostic.Reason, ExplicitOverride: diagnostic.Overridden}
+		record := buildDiagnosticRecord{Language: diagnostic.Language, Executable: diagnostic.Executable, Category: string(diagnostic.Category), Severity: string(diagnostic.Severity), Reason: diagnostic.Reason, ExplicitOverride: diagnostic.Overridden}
 		if diagnostic.Guidance != nil {
 			record.Command = diagnostic.Guidance.Command
 			record.DocumentationURL = diagnostic.Guidance.Documentation
@@ -125,6 +127,9 @@ func runBuild(cmd *cobra.Command, args []string) error {
 
 	// Create indexer and run
 	idx := indexer.NewIndexer(cfg, dbManager, cwd)
+	if jsonOutputFlag {
+		idx.SetProgressWriter(io.Discard)
+	}
 	defer idx.Close()
 
 	ctx := context.Background()
@@ -136,17 +141,28 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	if jsonOutputFlag {
 		return EmitJSON(cmd.OutOrStdout(), "build", nil, buildDiagnosticRecords(diagnostics), nil)
 	}
+	printDiagnostics(os.Stdout, diagnostics)
+	return nil
+}
+
+// printDiagnostics renders diagnostics for the human-readable build path. A
+// server-log record describes a running server reporting a problem and is never
+// rendered as unavailability.
+func printDiagnostics(out io.Writer, diagnostics []lsp.LSPDiagnostic) {
 	for _, diagnostic := range diagnostics {
-		fmt.Printf("⚠️  %s LSP unavailable (%s): %s\n", diagnostic.Language, diagnostic.Executable, diagnostic.Reason)
+		if diagnostic.Category == lsp.ServerLog {
+			fmt.Fprintf(out, "⚠️  %s LSP server reported a problem (%s) [%s]: %s\n", diagnostic.Language, diagnostic.Executable, diagnostic.Severity, diagnostic.Reason)
+			continue
+		}
+		fmt.Fprintf(out, "⚠️  %s LSP unavailable (%s): %s\n", diagnostic.Language, diagnostic.Executable, diagnostic.Reason)
 		if diagnostic.Guidance == nil {
 			continue
 		}
 		if diagnostic.Guidance.Command != "" {
-			fmt.Printf("   Installation guidance: %s\n", diagnostic.Guidance.Command)
+			fmt.Fprintf(out, "   Installation guidance: %s\n", diagnostic.Guidance.Command)
 		}
 		if diagnostic.Guidance.Documentation != "" {
-			fmt.Printf("   Documentation: %s\n", diagnostic.Guidance.Documentation)
+			fmt.Fprintf(out, "   Documentation: %s\n", diagnostic.Guidance.Documentation)
 		}
 	}
-	return nil
 }
