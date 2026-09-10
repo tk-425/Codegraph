@@ -16,16 +16,22 @@ import (
 
 // Client is a JSON-RPC 2.0 client for LSP communication
 type Client struct {
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	stdout  io.ReadCloser
-	reader  *bufio.Reader
-	
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout io.ReadCloser
+	reader *bufio.Reader
+
 	mu          sync.Mutex
 	nextID      int64
 	pending     map[int64]chan *Response
 	initialized bool
-	
+
+	// logMu guards the server log buffer separately from mu so the reader
+	// goroutine never contends with the pending map or stdin writes.
+	logMu       sync.Mutex
+	logMessages []LSPDiagnostic
+	logSeen     map[string]struct{}
+
 	Language string
 	RootURI  string
 }
@@ -69,11 +75,12 @@ func (e *ResponseError) Error() string {
 // NewClient creates a new LSP client
 func NewClient(command string, args []string, rootURI, language string) (*Client, error) {
 	cmd := exec.Command(command, args...)
-	
-	// Use filtered writer for all LSP servers to suppress noisy stderr
-	cmd.Stderr = &filteredWriter{
-		w:        os.Stderr,
-		language: language,
+
+	// Server standard error is discarded unless stderr passthrough is enabled.
+	if StderrPassthroughEnabled() {
+		cmd.Stderr = os.Stderr
+	} else {
+		cmd.Stderr = io.Discard
 	}
 
 	stdin, err := cmd.StdinPipe()
@@ -109,66 +116,42 @@ func NewClient(command string, args []string, rootURI, language string) (*Client
 	return client, nil
 }
 
-// filteredWriter filters out warning lines from stderr
-type filteredWriter struct {
-	w        io.Writer
-	language string
-	buf      []byte
+// logMessageCap bounds the retained server log messages per client.
+const logMessageCap = 50
+
+// recordLogMessage buffers a retained server log message, skipping text already
+// seen for this language and stopping silently at the cap.
+func (c *Client) recordLogMessage(severity DiagnosticSeverity, message string) {
+	c.logMu.Lock()
+	defer c.logMu.Unlock()
+
+	if _, seen := c.logSeen[message]; seen {
+		return
+	}
+	if len(c.logMessages) >= logMessageCap {
+		return
+	}
+	if c.logSeen == nil {
+		c.logSeen = make(map[string]struct{})
+	}
+	c.logSeen[message] = struct{}{}
+	c.logMessages = append(c.logMessages, LSPDiagnostic{
+		Language:   c.Language,
+		Executable: c.cmd.Path,
+		Category:   ServerLog,
+		Severity:   severity,
+		Reason:     message,
+	})
 }
 
-func (f *filteredWriter) Write(p []byte) (n int, err error) {
-	// Buffer the input to handle line-by-line filtering
-	f.buf = append(f.buf, p...)
-	
-	// Process complete lines
-	for {
-		idx := strings.IndexByte(string(f.buf), '\n')
-		if idx == -1 {
-			break
-		}
-		
-		line := string(f.buf[:idx+1])
-		f.buf = f.buf[idx+1:]
-		
-		// Skip Java warning lines for jdtls
-		if f.language == "java" {
-			if strings.Contains(line, "WARNING:") ||
-				strings.Contains(line, "INFO:") ||
-				strings.Contains(line, "sun.misc.Unsafe") ||
-				strings.Contains(line, "incubator modules") ||
-				strings.Contains(line, "spifly") ||
-				strings.Contains(line, "logback") {
-				continue
-			}
-		}
-		
-		// Skip OCaml dune/merlin messages for ocamllsp
-		if f.language == "ocaml" {
-			if strings.Contains(line, "halting dune") ||
-				strings.Contains(line, "closed merlin") ||
-				strings.Contains(line, "{ pid") ||
-				strings.Contains(line, "; initial_cwd") ||
-				strings.HasPrefix(strings.TrimSpace(line), "\"") ||
-				strings.TrimSpace(line) == "}" {
-				continue
-			}
-		}
-		
-		// Skip rust-analyzer "unknown request" messages
-		if f.language == "rust" {
-			if strings.Contains(line, "ERROR unknown request") ||
-				strings.Contains(line, "prepareTypeHierarchy") ||
-				strings.Contains(line, "supertypes") ||
-				strings.Contains(line, "subtypes") {
-				continue
-			}
-		}
-		
-		// Write non-filtered lines
-		f.w.Write([]byte(line))
-	}
-	
-	return len(p), nil
+// DrainLogMessages returns the buffered server log messages and clears the buffer.
+func (c *Client) DrainLogMessages() []LSPDiagnostic {
+	c.logMu.Lock()
+	defer c.logMu.Unlock()
+
+	drained := c.logMessages
+	c.logMessages = nil
+	return drained
 }
 
 // Initialize sends the initialize request to the LSP server
@@ -230,7 +213,7 @@ func (c *Client) Shutdown(ctx context.Context) error {
 // Call sends a request and waits for response
 func (c *Client) Call(ctx context.Context, method string, params, result any) error {
 	id := atomic.AddInt64(&c.nextID, 1)
-	
+
 	req := Request{
 		JSONRPC: "2.0",
 		ID:      id,
@@ -288,10 +271,10 @@ func (c *Client) send(req Request) error {
 	}
 
 	header := fmt.Sprintf("Content-Length: %d\r\n\r\n", len(data))
-	
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	
+
 	if _, err := io.WriteString(c.stdin, header); err != nil {
 		return fmt.Errorf("failed to write header: %w", err)
 	}
@@ -334,6 +317,15 @@ func (c *Client) readResponses() {
 
 		var message wireMessage
 		if err := json.Unmarshal(body, &message); err != nil {
+			continue
+		}
+		if message.Method == "window/logMessage" {
+			var params LogMessageParams
+			if json.Unmarshal(message.Params, &params) == nil {
+				if severity, retained := SeverityForMessageType(params.Type); retained {
+					c.recordLogMessage(severity, params.Message)
+				}
+			}
 			continue
 		}
 		if message.Method != "" {

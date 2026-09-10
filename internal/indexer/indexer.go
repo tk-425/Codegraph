@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -22,6 +23,7 @@ type Indexer struct {
 	rootPath    string
 	rootURI     string
 	diagnostics []lsp.LSPDiagnostic
+	progress    io.Writer
 }
 
 // NewIndexer creates a new indexer
@@ -36,8 +38,14 @@ func NewIndexer(cfg *config.Config, dbManager *db.Manager, rootPath string) *Ind
 		rootPath:    absPath,
 		rootURI:     rootURI,
 		diagnostics: nil,
+		progress:    os.Stdout,
 	}
 }
+
+// SetProgressWriter redirects the indexer's human-readable progress output.
+// Callers emitting machine-readable output pass io.Discard so stdout carries
+// nothing but their own payload.
+func (i *Indexer) SetProgressWriter(w io.Writer) { i.progress = w }
 
 // IndexProject indexes all source files in the project
 func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool) error {
@@ -90,7 +98,7 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 
 			// Show progress
 			progress := float64(idx+1) / float64(langTotal) * 100
-			fmt.Printf("\r   [%s] %d/%d files (%.0f%%) ", language, idx+1, langTotal, progress)
+			fmt.Fprintf(i.progress, "\r   [%s] %d/%d files (%.0f%%) ", language, idx+1, langTotal, progress)
 
 			symbols := 0
 			var err error
@@ -113,7 +121,7 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 				tsSymbols, tsErr := tsIndexer.IndexFile(ctx, file)
 				if tsErr != nil {
 					if err != nil {
-						fmt.Printf("\n   ⚠️  Error indexing %s: %v (tree-sitter: %v)\n", file.RelPath, err, tsErr)
+						fmt.Fprintf(i.progress, "\n   ⚠️  Error indexing %s: %v (tree-sitter: %v)\n", file.RelPath, err, tsErr)
 					}
 					// If LSP managed 0 and tree-sitter failed, we just continue (count as 0)
 					continue
@@ -135,14 +143,14 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 
 		// Clear progress line and show summary with source counts
 		if langIndexed > 0 {
-			fmt.Printf("\r   [%s] %d indexed (%d LSP, %d tree-sitter), %d skipped         \n", language, langIndexed, langLSP, langTreeSitter, langSkipped)
+			fmt.Fprintf(i.progress, "\r   [%s] %d indexed (%d LSP, %d tree-sitter), %d skipped         \n", language, langIndexed, langLSP, langTreeSitter, langSkipped)
 		} else if langSkipped > 0 {
-			fmt.Printf("\r   [%s] 0 indexed, %d skipped (unchanged)         \n", language, langSkipped)
+			fmt.Fprintf(i.progress, "\r   [%s] 0 indexed, %d skipped (unchanged)         \n", language, langSkipped)
 		}
 	}
 
 	// Index call graph for each language
-	fmt.Println("📊 Extracting call graph (via references)...")
+	fmt.Fprintln(i.progress, "📊 Extracting call graph (via references)...")
 	callGraphIndexer := NewCallGraphIndexer(i.db, i.lsp, i.rootPath)
 	callExtractor := NewCallExtractor(i.db, i.rootPath)
 	totalCalls := 0
@@ -159,16 +167,16 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 			}
 			if err != nil {
 				// Only show warning if there was an actual error (not just 0 results)
-				fmt.Printf("   ⚠️  Call graph LSP error for %s (using tree-sitter): %v\n", language, err)
+				fmt.Fprintf(i.progress, "   ⚠️  Call graph LSP error for %s (using tree-sitter): %v\n", language, err)
 			}
 			continue
 		}
 		totalCalls += calls
 	}
-	fmt.Printf("   Found %d call relationships\n", totalCalls)
+	fmt.Fprintf(i.progress, "   Found %d call relationships\n", totalCalls)
 
 	// Index type hierarchy for each language
-	fmt.Println("🔗 Extracting type hierarchy...")
+	fmt.Fprintln(i.progress, "🔗 Extracting type hierarchy...")
 	hierarchyIndexer := NewHierarchyIndexer(i.db, i.lsp, i.rootPath)
 	totalHierarchy := 0
 
@@ -187,7 +195,7 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 		}
 		totalHierarchy += count
 	}
-	fmt.Printf("   Found %d type relationships\n", totalHierarchy)
+	fmt.Fprintf(i.progress, "   Found %d type relationships\n", totalHierarchy)
 
 	// Preserve one diagnostic per language for the build boundary.
 	i.diagnostics = i.lsp.Diagnostics()
@@ -195,7 +203,7 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 	// Shutdown LSP servers
 	i.lsp.ShutdownAll()
 
-	fmt.Printf("✅ Indexed %d files, skipped %d unchanged, %d symbols, %d calls, %d type relations\n",
+	fmt.Fprintf(i.progress, "✅ Indexed %d files, skipped %d unchanged, %d symbols, %d calls, %d type relations\n",
 		indexedFiles, skippedFiles, totalSymbols, totalCalls, totalHierarchy)
 	return nil
 }

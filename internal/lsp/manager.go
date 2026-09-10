@@ -103,13 +103,21 @@ func (m *Manager) GetClient(ctx context.Context, language string) (*Client, erro
 	return nil, fmt.Errorf("failed to initialize LSP for %s: %w", language, lastErr)
 }
 
-// Diagnostics returns one diagnostic per affected language.
+// Diagnostics returns one startup-failure diagnostic per affected language,
+// followed by the server log messages drained from every live client.
 func (m *Manager) Diagnostics() []LSPDiagnostic {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make([]LSPDiagnostic, 0, len(m.diagnostics))
 	for _, diagnostic := range m.diagnostics {
 		out = append(out, diagnostic)
+	}
+	for _, client := range m.clients {
+		logs := client.DrainLogMessages()
+		if len(logs) > logMessageCap {
+			logs = logs[:logMessageCap]
+		}
+		out = append(out, logs...)
 	}
 	return out
 }
