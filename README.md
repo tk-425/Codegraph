@@ -106,6 +106,13 @@ CodeGraph works best with Language Servers installed for precise call graphs and
 | `prune`              | Remove missing projects from the registry.                      |
 | `health`             | Run diagnostics on the current project.                         |
 
+Persistent flags, available on every command:
+
+| Flag           | Description                                                                                      |
+| :------------- | :----------------------------------------------------------------------------------------------- |
+| `--json`       | Emit machine-readable JSON output (read-only query commands only).                                |
+| `--lsp-stderr` | Forward raw language-server standard error instead of discarding it. Also set by `CODEGRAPH_LSP_STDERR`. |
+
 ## 🤖 AI Agent Integration
 
 CodeGraph exposes **Skills** that allow AI agents to use these tools directly.

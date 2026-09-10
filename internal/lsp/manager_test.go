@@ -34,7 +34,9 @@ func TestManagerRetriesNativeInitializationAtMostThreeTimes(t *testing.T) {
 	}
 	calls, cleanups, sleeps := 0, 0, 0
 	oldNew, oldInit, oldCleanup, oldSleep := newLSPClient, initializeLSP, cleanupFailedLSP, sleepBeforeRetry
-	defer func() { newLSPClient, initializeLSP, cleanupFailedLSP, sleepBeforeRetry = oldNew, oldInit, oldCleanup, oldSleep }()
+	defer func() {
+		newLSPClient, initializeLSP, cleanupFailedLSP, sleepBeforeRetry = oldNew, oldInit, oldCleanup, oldSleep
+	}()
 	newLSPClient = func(string, []string, string, string) (*Client, error) { calls++; return &Client{}, nil }
 	initializeLSP = func(context.Context, *Client) error { return errors.New("not ready") }
 	cleanupFailedLSP = func(*Client) { cleanups++ }
@@ -96,7 +98,9 @@ func TestManagerNativeInitializationSucceedsOnThirdAttempt(t *testing.T) {
 	}
 	calls := 0
 	oldNew, oldInit, oldCleanup, oldSleep := newLSPClient, initializeLSP, cleanupFailedLSP, sleepBeforeRetry
-	defer func() { newLSPClient, initializeLSP, cleanupFailedLSP, sleepBeforeRetry = oldNew, oldInit, oldCleanup, oldSleep }()
+	defer func() {
+		newLSPClient, initializeLSP, cleanupFailedLSP, sleepBeforeRetry = oldNew, oldInit, oldCleanup, oldSleep
+	}()
 	newLSPClient = func(string, []string, string, string) (*Client, error) { calls++; return &Client{}, nil }
 	initializeLSP = func(context.Context, *Client) error {
 		if calls < 3 {
@@ -132,5 +136,51 @@ func TestManagerDoesNotRetryAfterInitialization(t *testing.T) {
 	}
 	if _, err := manager.GetClient(context.Background(), "typescript"); err != nil || client == nil || calls != 1 {
 		t.Fatalf("err=%v client=%v calls=%d", err, client != nil, calls)
+	}
+}
+
+func TestManagerDiagnosticsMergesStartupFailuresAndServerLogs(t *testing.T) {
+	manager := &Manager{
+		clients: map[string]*Client{
+			"rust": {Language: "rust", logMessages: []LSPDiagnostic{
+				{Language: "rust", Executable: "rust-analyzer", Category: ServerLog, Severity: SeverityWarning, Reason: "unresolved import"},
+			}},
+		},
+		diagnostics: map[string]LSPDiagnostic{
+			"java": {Language: "java", Executable: "jdtls", Category: MissingExecutable, Severity: SeverityError, Reason: "executable file not found"},
+		},
+	}
+
+	records := manager.Diagnostics()
+	if len(records) != 2 {
+		t.Fatalf("got %d records, want the startup failure plus the server log", len(records))
+	}
+
+	byCategory := make(map[DiagnosticCategory]LSPDiagnostic, len(records))
+	for _, record := range records {
+		byCategory[record.Category] = record
+	}
+
+	startup, ok := byCategory[MissingExecutable]
+	if !ok {
+		t.Fatal("missing the startup-failure record")
+	}
+	if startup.Language != "java" || startup.Severity != SeverityError {
+		t.Errorf("startup record = %+v, want java at error severity", startup)
+	}
+
+	serverLog, ok := byCategory[ServerLog]
+	if !ok {
+		t.Fatal("missing the server-log record")
+	}
+	if serverLog.Language != "rust" || serverLog.Severity != SeverityWarning {
+		t.Errorf("server-log record = %+v, want rust at warning severity", serverLog)
+	}
+	if serverLog.Guidance != nil {
+		t.Errorf("guidance = %+v, want none on a server-log record", serverLog.Guidance)
+	}
+
+	if second := manager.Diagnostics(); len(second) != 1 {
+		t.Errorf("second call returned %d records, want only the startup failure after the drain", len(second))
 	}
 }

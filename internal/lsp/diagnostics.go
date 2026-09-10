@@ -10,13 +10,36 @@ import (
 	"strings"
 )
 
-// DiagnosticCategory identifies why an LSP server could not be used.
+// DiagnosticCategory identifies the language-server condition a diagnostic describes.
 type DiagnosticCategory string
 
 const (
 	MissingExecutable     DiagnosticCategory = "missing_executable"
 	InitializationFailure DiagnosticCategory = "initialization_failure"
+	ServerLog             DiagnosticCategory = "server_log"
 )
+
+// DiagnosticSeverity is the severity a diagnostic carries.
+type DiagnosticSeverity string
+
+const (
+	SeverityError   DiagnosticSeverity = "error"
+	SeverityWarning DiagnosticSeverity = "warning"
+)
+
+// SeverityForMessageType maps a protocol message type to a diagnostic severity.
+// Only Error and Warning are retained; retained reports whether the message is kept.
+// This is the sole protocol-to-severity mapping in the codebase.
+func SeverityForMessageType(t MessageType) (severity DiagnosticSeverity, retained bool) {
+	switch t {
+	case MessageTypeError:
+		return SeverityError, true
+	case MessageTypeWarning:
+		return SeverityWarning, true
+	default:
+		return "", false
+	}
+}
 
 // InstallationGuidance describes a safe remediation path.
 type InstallationGuidance struct {
@@ -29,6 +52,7 @@ type LSPDiagnostic struct {
 	Language   string                `json:"language"`
 	Executable string                `json:"executable"`
 	Category   DiagnosticCategory    `json:"category"`
+	Severity   DiagnosticSeverity    `json:"severity"`
 	Reason     string                `json:"reason"`
 	Guidance   *InstallationGuidance `json:"guidance,omitempty"`
 	Overridden bool                  `json:"explicit_override"`
@@ -115,5 +139,5 @@ func classifyFailure(err error) DiagnosticCategory {
 }
 
 func newDiagnostic(language, executable, root string, err error, overridden bool) LSPDiagnostic {
-	return LSPDiagnostic{Language: language, Executable: executable, Category: classifyFailure(err), Reason: fmt.Sprintf("%v", err), Guidance: Guidance(language, root, overridden), Overridden: overridden}
+	return LSPDiagnostic{Language: language, Executable: executable, Category: classifyFailure(err), Severity: SeverityError, Reason: fmt.Sprintf("%v", err), Guidance: Guidance(language, root, overridden), Overridden: overridden}
 }

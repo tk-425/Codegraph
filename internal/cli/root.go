@@ -4,6 +4,8 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+
+	"github.com/tk-425/Codegraph/internal/lsp"
 )
 
 var rootCmd = &cobra.Command{
@@ -18,6 +20,7 @@ func Execute() error {
 
 func init() {
 	rootCmd.PersistentFlags().BoolVar(&jsonOutputFlag, "json", false, "Emit machine-readable JSON output (read-only query commands only)")
+	rootCmd.PersistentFlags().BoolVar(&lsp.StderrPassthrough, "lsp-stderr", false, "Forward raw language-server standard error instead of discarding it")
 
 	defaultHelp := rootCmd.HelpFunc()
 	rootCmd.SetHelpFunc(func(cmd *cobra.Command, args []string) {

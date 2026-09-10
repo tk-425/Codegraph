@@ -32,6 +32,23 @@ type TextDocumentPositionParams struct {
 	Position     Position               `json:"position"`
 }
 
+// MessageType is the severity of a window/logMessage notification
+type MessageType int
+
+const (
+	MessageTypeError   MessageType = 1
+	MessageTypeWarning MessageType = 2
+	MessageTypeInfo    MessageType = 3
+	MessageTypeLog     MessageType = 4
+	MessageTypeDebug   MessageType = 5
+)
+
+// LogMessageParams are the parameters of a window/logMessage notification
+type LogMessageParams struct {
+	Type    MessageType `json:"type"`
+	Message string      `json:"message"`
+}
+
 // SymbolKind represents the kind of a symbol
 type SymbolKind int
 
@@ -118,13 +135,13 @@ type SymbolInformation struct {
 
 // CallHierarchyItem represents an item in a call hierarchy
 type CallHierarchyItem struct {
-	Name           string   `json:"name"`
+	Name           string     `json:"name"`
 	Kind           SymbolKind `json:"kind"`
-	Detail         string   `json:"detail,omitempty"`
-	URI            string   `json:"uri"`
-	Range          Range    `json:"range"`
-	SelectionRange Range    `json:"selectionRange"`
-	Data           any      `json:"data,omitempty"`
+	Detail         string     `json:"detail,omitempty"`
+	URI            string     `json:"uri"`
+	Range          Range      `json:"range"`
+	SelectionRange Range      `json:"selectionRange"`
+	Data           any        `json:"data,omitempty"`
 }
 
 // CallHierarchyIncomingCall represents an incoming call
