@@ -2,13 +2,10 @@ package cli
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/tk-425/Codegraph/internal/config"
-	"github.com/tk-425/Codegraph/internal/db"
 )
 
 var (
@@ -32,6 +29,7 @@ Examples:
 func init() {
 	calleesCmd.Flags().IntVar(&calleesDepthFlag, "depth", 1, "Depth of call chain to traverse")
 	calleesCmd.Flags().StringVar(&calleesLangFlag, "lang", "", "Filter by language(s), comma-separated")
+	supportJSON(calleesCmd)
 	rootCmd.AddCommand(calleesCmd)
 }
 
@@ -50,29 +48,9 @@ func runCallees(cmd *cobra.Command, args []string) error {
 		return runCalleesJSON(cmd, symbol)
 	}
 
-	// Get current directory
-	cwd, err := os.Getwd()
+	cwd, _, dbManager, _, err := openProject()
 	if err != nil {
-		return fmt.Errorf("failed to get current directory: %w", err)
-	}
-
-	// Check if codegraph is initialized
-	codegraphDir := filepath.Join(cwd, ".codegraph")
-	if _, err := os.Stat(codegraphDir); os.IsNotExist(err) {
-		return fmt.Errorf("codegraph not initialized. Run 'codegraph init' first")
-	}
-
-	// Load config
-	cfg, err := config.Load(cwd)
-	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
-	}
-
-	// Open database
-	dbPath := cfg.GetDatabasePath(cwd)
-	dbManager, err := db.NewManager(dbPath)
-	if err != nil {
-		return fmt.Errorf("failed to open database: %w", err)
+		return err
 	}
 	defer dbManager.Close()
 
@@ -116,7 +94,7 @@ func runCalleesJSON(cmd *cobra.Command, symbol string) error {
 		return err
 	}
 
-	cwd, _, dbManager, code, err := openProject(false)
+	cwd, _, dbManager, code, err := openProject()
 	if err != nil {
 		return emitErr(code, err)
 	}

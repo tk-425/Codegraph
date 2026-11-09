@@ -32,7 +32,7 @@ func TestScannerRoutesTypeScriptReactJavaScriptAndOtherLanguages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	files, err := scanner.Scan()
+	files, err := scanner.Scan(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,8 @@ func TestIndexProjectRetriesNativeTypeScriptThenFallsBack(t *testing.T) {
 	if err := database.Initialize(); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	// The build honours its deadline, so allow the three attempts and backoff.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := NewIndexer(cfg, database, root).IndexProject(ctx, []FileInfo{{Path: filePath, RelPath: "example.ts", Language: "typescript"}}, true); err != nil {
 		t.Fatal(err)

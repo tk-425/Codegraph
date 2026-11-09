@@ -17,6 +17,11 @@ const (
 	MissingExecutable     DiagnosticCategory = "missing_executable"
 	InitializationFailure DiagnosticCategory = "initialization_failure"
 	ServerLog             DiagnosticCategory = "server_log"
+	// RequestFailed records requests that failed within one indexing phase
+	// while the build continued with fallback or omitted results.
+	RequestFailed DiagnosticCategory = "request_failed"
+	// CleanupFailed records a server that had to be killed or was not reaped.
+	CleanupFailed DiagnosticCategory = "cleanup_failed"
 )
 
 // DiagnosticSeverity is the severity a diagnostic carries.

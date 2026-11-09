@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -35,6 +36,29 @@ func NewManager(dbPath string) (*Manager, error) {
 		return nil, fmt.Errorf("failed to enable foreign keys: %w", err)
 	}
 
+	return &Manager{db: db, dbPath: dbPath}, nil
+}
+
+// OpenReadOnly opens an existing database for queries. It never creates the
+// file or its directory, never migrates, and rejects writes. A missing file
+// returns an error wrapping os.ErrNotExist.
+func OpenReadOnly(dbPath string) (*Manager, error) {
+	absPath, err := filepath.Abs(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(absPath); err != nil {
+		return nil, fmt.Errorf("failed to open database: %w", err)
+	}
+	dsn := (&url.URL{Scheme: "file", Path: absPath, RawQuery: "mode=ro"}).String()
+	db, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database: %w", err)
+	}
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to open database: %w", err)
+	}
 	return &Manager{db: db, dbPath: dbPath}, nil
 }
 

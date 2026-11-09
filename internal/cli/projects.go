@@ -18,6 +18,7 @@ var projectsCmd = &cobra.Command{
 }
 
 func init() {
+	supportJSON(projectsCmd)
 	rootCmd.AddCommand(projectsCmd)
 }
 

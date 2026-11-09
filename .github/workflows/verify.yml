@@ -1,0 +1,58 @@
+name: verify
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-baseline:
+    runs-on: macos-latest
+    env:
+      CGO_ENABLED: "1"
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Compile
+        run: go build ./...
+      - name: Ordinary tests
+        run: go test ./...
+      - name: Characterization controls and S1-fixed cases
+        # F06 (transport) and F08 (JSON boundary) were fixed by S1 and now gate.
+        run: go test -tags characterization -run '^TestCharacterization(Control|F06|F08)' -count=1 -timeout=120s ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Format S0 and S1 files
+        # Existing formatting debt is recorded in the fix-spec, not auto-fixed here.
+        run: |
+          unformatted="$(gofmt -l \
+            cmd/codegraph/characterization_test.go \
+            internal/indexer/characterization_test.go \
+            internal/lsp/characterization_test.go \
+            internal/search/characterization_test.go \
+            testdata/characterization \
+            cmd/codegraph/main.go cmd/codegraph/main_test.go \
+            internal/cli/root.go internal/cli/build.go internal/cli/json_output.go \
+            internal/cli/search.go internal/cli/signature.go internal/cli/health.go \
+            internal/cli/stats.go internal/cli/implementations.go \
+            internal/cli/projects.go internal/cli/types.go \
+            internal/config internal/db/manager.go internal/db/readonly_test.go \
+            internal/indexer/indexer.go internal/indexer/hierarchy.go \
+            internal/indexer/scanner.go internal/indexer/indexer_test.go \
+            internal/indexer/transport_test.go internal/ignore/ignore_test.go \
+            internal/lsp/client.go internal/lsp/client_test.go \
+            internal/lsp/manager.go internal/lsp/manager_test.go \
+            internal/lsp/diagnostics.go internal/lsp/lifecycle_test.go \
+            internal/lsp/main_test.go internal/search/orchestrator_test.go)"
+          if [ -n "$unformatted" ]; then
+            printf '%s\n' "$unformatted"
+            exit 1
+          fi
+      # Known-red checks are explicitly run during remediation. Do not hide
+      # failures with continue-on-error or call the controls acceptance coverage.

@@ -15,12 +15,7 @@ import (
 func TestReadResponsesAnswersRegisterCapabilityRequest(t *testing.T) {
 	serverReader, serverWriter := io.Pipe()
 	clientReader, clientWriter := io.Pipe()
-	client := &Client{
-		stdin:   clientWriter,
-		stdout:  io.NopCloser(strings.NewReader("")),
-		reader:  bufio.NewReader(serverReader),
-		pending: make(map[int64]chan *Response),
-	}
+	client := newClient(clientWriter, serverReader, "", "")
 
 	done := make(chan struct{})
 	go func() {
@@ -111,13 +106,8 @@ func TestNewClientStderrSink(t *testing.T) {
 func feedLogMessages(t *testing.T, messages []LogMessageParams) []LSPDiagnostic {
 	t.Helper()
 	serverReader, serverWriter := io.Pipe()
-	client := &Client{
-		stdout:   io.NopCloser(strings.NewReader("")),
-		reader:   bufio.NewReader(serverReader),
-		pending:  make(map[int64]chan *Response),
-		Language: "rust",
-		cmd:      exec.Command("rust-analyzer"),
-	}
+	client := newClient(nopWriteCloser{}, serverReader, "", "rust")
+	client.cmd = exec.Command("rust-analyzer")
 
 	done := make(chan struct{})
 	go func() {
@@ -209,3 +199,8 @@ func TestLogMessageStopsAtBufferCap(t *testing.T) {
 		t.Fatalf("got %d records, want the cap of %d", len(records), logMessageCap)
 	}
 }
+
+type nopWriteCloser struct{}
+
+func (nopWriteCloser) Write(p []byte) (int, error) { return len(p), nil }
+func (nopWriteCloser) Close() error                { return nil }

@@ -12,15 +12,13 @@ import (
 	"github.com/tk-425/Codegraph/internal/db"
 )
 
-// openProject runs the common JSON-path scaffolding shared by every in-scope
-// query command: resolve cwd, verify .codegraph/ exists, load config, and open
-// the SQLite database. On failure it returns a stable error code (matching
-// the per-command error codes already documented in the JSON spec) so the
-// caller can plug it straight into an EnvelopeError. When requireExistingDB
-// is true and the database file is missing, it returns code "database_missing"
-// without attempting to open (which would auto-create an empty file). The
+// openProject runs the common scaffolding shared by every read-only query
+// command: resolve cwd, verify .codegraph/ exists, load config, and open the
+// existing SQLite database read-only. Queries never create, initialize or
+// migrate a database; a missing file returns code "database_missing". On
+// failure the stable error code can go straight into an EnvelopeError. The
 // returned *db.Manager must be Closed by the caller on success.
-func openProject(requireExistingDB bool) (string, *config.Config, *db.Manager, string, error) {
+func openProject() (string, *config.Config, *db.Manager, string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", nil, nil, "cwd_failed", fmt.Errorf("failed to get current directory: %w", err)
@@ -34,14 +32,12 @@ func openProject(requireExistingDB bool) (string, *config.Config, *db.Manager, s
 		return cwd, nil, nil, "config_load_failed", fmt.Errorf("failed to load config: %w", err)
 	}
 	dbPath := cfg.GetDatabasePath(cwd)
-	if requireExistingDB {
-		if _, statErr := os.Stat(dbPath); os.IsNotExist(statErr) {
-			return cwd, cfg, nil, "database_missing", fmt.Errorf("database not found. Run 'codegraph build' first")
-		}
+	if _, statErr := os.Stat(dbPath); os.IsNotExist(statErr) {
+		return cwd, cfg, nil, "database_missing", fmt.Errorf("database not found. Run 'codegraph build' first")
 	}
-	dbm, err := db.NewManager(dbPath)
+	dbm, err := db.OpenReadOnly(dbPath)
 	if err != nil {
-		return cwd, cfg, nil, "db_open_failed", fmt.Errorf("failed to open database: %w", err)
+		return cwd, cfg, nil, "db_open_failed", err
 	}
 	return cwd, cfg, dbm, "", nil
 }
