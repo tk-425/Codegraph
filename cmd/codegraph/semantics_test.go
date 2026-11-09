@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"database/sql"
 	"os"
 	"path/filepath"
@@ -76,5 +78,56 @@ func TestBuildStoresReceiverMethodsAsDistinctSymbols(t *testing.T) {
 	}
 	if got := userVersion(t, root); got != db.FormatVersion {
 		t.Errorf("user_version=%d, want %d", got, db.FormatVersion)
+	}
+}
+
+func fileDigest(t *testing.T, path string) [32]byte {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sha256.Sum256(content)
+}
+
+// SC12 (D06): a graph from an earlier index format is never read or extended
+// as if current; only build --force replaces it.
+func TestLegacyIndexFormatRequiresExplicitRebuild(t *testing.T) {
+	root := newSyntaxProject(t, map[string]string{
+		"source.go": "package fixture\n\nfunc Target() {}\n\nfunc Caller() { Target() }\n",
+	})
+	requireBuild(t, root)
+	dbPath := filepath.Join(root, ".codegraph", "graphs", "codegraph.db")
+	conn, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec("PRAGMA user_version = 0"); err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	legacy := fileDigest(t, dbPath)
+
+	for _, args := range [][]string{
+		{"callers", "Target", "--json"},
+		{"search", "Target", "--json"},
+		{"stats", "--json"},
+		{"build", "--json"},
+	} {
+		requireErrorCode(t, runCLI(t, root, args...), "index_format_incompatible")
+		if fileDigest(t, dbPath) != legacy {
+			t.Fatalf("%v modified the legacy database", args)
+		}
+	}
+	if human := runCLI(t, root, "callers", "Target"); human.exit == 0 || !bytes.Contains(human.stderr, []byte("build --force")) {
+		t.Errorf("human query on legacy index: exit=%d stderr=%s", human.exit, human.stderr)
+	}
+
+	requireBuild(t, root, "--force")
+	if got := userVersion(t, root); got != db.FormatVersion {
+		t.Errorf("after force rebuild user_version=%d, want %d", got, db.FormatVersion)
+	}
+	if found := requireOneEnvelope(t, runCLI(t, root, "search", "Target", "--json", "--exact")); found.Count != 1 {
+		t.Errorf("search after rebuild = %d, want 1", found.Count)
 	}
 }

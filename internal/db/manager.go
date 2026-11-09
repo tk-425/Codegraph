@@ -82,6 +82,62 @@ func (m *Manager) Initialize() error {
 	return nil
 }
 
+// IncompatibleFormatError reports a database whose graph was written in
+// another index format. Its identities cannot be read with current rules.
+type IncompatibleFormatError struct {
+	Found int
+}
+
+func (e *IncompatibleFormatError) Error() string {
+	return fmt.Sprintf("index format %d is incompatible with this version (format %d); run 'codegraph build --force' to rebuild", e.Found, FormatVersion)
+}
+
+// CheckFormat returns *IncompatibleFormatError when the database holds a
+// graph in another index format. A database without graph tables is
+// compatible. It never writes.
+func (m *Manager) CheckFormat() error {
+	var tables int
+	if err := m.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'symbols'`).Scan(&tables); err != nil {
+		return fmt.Errorf("failed to inspect schema: %w", err)
+	}
+	if tables == 0 {
+		return nil
+	}
+	var version int
+	if err := m.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		return fmt.Errorf("failed to read format version: %w", err)
+	}
+	if version != FormatVersion {
+		return &IncompatibleFormatError{Found: version}
+	}
+	return nil
+}
+
+// ResetFormat drops the graph tables and recreates them in the current
+// format, in one transaction: on failure the previous database is unchanged.
+// Only an explicitly requested rebuild calls it; the graph data is discarded.
+func (m *Manager) ResetFormat() error {
+	tx, err := m.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin format reset: %w", err)
+	}
+	defer tx.Rollback()
+	for _, table := range graphTables {
+		if _, err := tx.Exec("DROP TABLE IF EXISTS " + table); err != nil {
+			return fmt.Errorf("failed to drop %s: %w", table, err)
+		}
+	}
+	for _, stmt := range AllSchemaStatements() {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("failed to execute schema statement: %w", err)
+		}
+	}
+	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", FormatVersion)); err != nil {
+		return fmt.Errorf("failed to stamp format version: %w", err)
+	}
+	return tx.Commit()
+}
+
 // Close closes the database connection
 func (m *Manager) Close() error {
 	return m.db.Close()

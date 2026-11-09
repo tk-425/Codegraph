@@ -66,6 +66,9 @@ CREATE INDEX IF NOT EXISTS idx_type_hierarchy_parent ON type_hierarchy(parent_id
 `
 )
 
+// graphTables are the tables a format reset drops, children first.
+var graphTables = []string{"calls", "type_hierarchy", "symbols", "file_meta"}
+
 // AllSchemaStatements returns all SQL statements needed to create the schema
 func AllSchemaStatements() []string {
 	return []string{
