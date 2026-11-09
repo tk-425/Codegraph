@@ -282,3 +282,40 @@ func provesOwner(object, call *sitter.Node, language string, content []byte) boo
 	}
 	return false
 }
+
+// position is a stored source position: 1-based line, UTF-8 byte column.
+type position struct{ line, column int }
+
+// invocationSites returns the positions of every invoked name in a file:
+// the evidence that a reference at one of them is a call. ok is false when
+// the language has no call syntax to check against.
+func invocationSites(ctx context.Context, path, language string) (sites map[position]bool, ok bool, err error) {
+	syntax, known := callSyntaxes[language]
+	lang := grammar(language)
+	if !known || lang == nil {
+		return nil, false, nil
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, true, fmt.Errorf("failed to read file: %w", err)
+	}
+	parser := sitter.NewParser()
+	parser.SetLanguage(lang)
+	tree, err := parser.ParseCtx(ctx, nil, content)
+	if err != nil {
+		return nil, true, fmt.Errorf("tree-sitter parse error: %w", err)
+	}
+	defer tree.Close()
+
+	sites = map[position]bool{}
+	walk(tree.RootNode(), func(n *sitter.Node) {
+		if !syntax.isCall(n) {
+			return
+		}
+		if name, _ := syntax.callee(n); name != nil {
+			line, column := nodePosition(name)
+			sites[position{line, column}] = true
+		}
+	})
+	return sites, true, nil
+}

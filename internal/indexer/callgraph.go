@@ -4,13 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/tk-425/Codegraph/internal/db"
 	"github.com/tk-425/Codegraph/internal/lsp"
 )
 
-// CallGraphIndexer handles call hierarchy extraction using references
+// CallGraphIndexer extracts calls from a language server
 type CallGraphIndexer struct {
 	db       *db.Manager
 	mgr      *lsp.Manager
@@ -28,8 +27,9 @@ func NewCallGraphIndexer(dbManager *db.Manager, lspManager *lsp.Manager, rootPat
 	}
 }
 
-// IndexCallGraph extracts call relationships using textDocument/references
-// For each function symbol, we find all references to it - these are potential call sites
+// IndexCallGraph extracts the calls to every indexed callable of language.
+// A reference is a call only when the syntax at that position is an
+// invocation; the caller is the innermost callable containing it.
 func (c *CallGraphIndexer) IndexCallGraph(ctx context.Context, language string) (int, error) {
 	c.failures = requestFailures{}
 	// Get LSP client for this language
@@ -49,32 +49,40 @@ func (c *CallGraphIndexer) IndexCallGraph(ctx context.Context, language string) 
 		return 0, fmt.Errorf("failed to get function symbols: %w", err)
 	}
 
-	callCount := 0
+	pass := &callPass{
+		db:          c.db,
+		language:    language,
+		root:        lsp.NewRoot(c.rootPath),
+		lines:       lsp.NewSourceLines(),
+		enc:         client.PositionEncoding(),
+		symbols:     map[string]fileSymbols{},
+		invocations: map[string]map[position]bool{},
+	}
 	openedFiles := make(map[string]bool)
-	root := lsp.NewRoot(c.rootPath)
-	lines := lsp.NewSourceLines()
-	enc := client.PositionEncoding()
+	defer func() {
+		for fileURI := range openedFiles {
+			client.DidCloseTextDocument(fileURI)
+		}
+	}()
 
+	callCount := 0
 	for _, sym := range symbols {
 		fileURI := lsp.PathToURI(sym.File)
 
 		// Open file if not already opened
 		if !openedFiles[fileURI] {
-			content, err := readFileContent(sym.File)
+			content, err := os.ReadFile(sym.File)
 			if err != nil {
 				continue
 			}
-			if err := client.DidOpenTextDocument(fileURI, language, content); err != nil {
+			if err := client.DidOpenTextDocument(fileURI, language, string(content)); err != nil {
 				c.failures.add(client, err)
 				continue
 			}
 			openedFiles[fileURI] = true
 		}
 
-		// Get position of the function name
-		pos := lines.ToLSP(enc, sym.File, sym.Line, sym.Column)
-
-		// Find all references to this function (excluding declaration)
+		pos := pass.lines.ToLSP(pass.enc, sym.File, sym.Line, sym.Column)
 		refs, err := client.References(ctx, fileURI, pos, false)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
@@ -83,91 +91,96 @@ func (c *CallGraphIndexer) IndexCallGraph(ctx context.Context, language string) 
 			c.failures.add(client, err)
 			continue
 		}
-
-		// Each reference is a potential call site
 		for _, ref := range refs {
-			refPath, err := root.Path(ref.URI)
+			path, err := pass.root.Path(ref.URI)
 			if err != nil {
 				continue
 			}
-			
-			refLine, refColumn := lines.FromLSP(enc, refPath, ref.Range.Start)
-
-			// Skip if same location as declaration
-			if refPath == sym.File && refLine == sym.Line {
-				continue
+			line, column := pass.lines.FromLSP(pass.enc, path, ref.Range.Start)
+			stored, err := pass.reference(ctx, sym, path, line, column)
+			if err != nil {
+				return callCount, err
 			}
-
-			// Find which function contains this reference
-			callerID := c.findContainingFunction(refPath, refLine, language)
-			if callerID == "" {
-				continue
+			if stored {
+				callCount++
 			}
-
-			// Store call relationship
-			dbCall := &db.Call{
-				CallerID: callerID,
-				CalleeID: sym.ID,
-				File:     refPath,
-				Line:     refLine,
-				Column:   refColumn,
-			}
-
-			if err := c.db.InsertCall(dbCall); err != nil {
-				// Skip duplicate calls
-				continue
-			}
-			callCount++
 		}
-	}
-
-	// Close opened files
-	for fileURI := range openedFiles {
-		client.DidCloseTextDocument(fileURI)
 	}
 
 	return callCount, nil
 }
 
-// findContainingFunction finds which function contains a given line
-func (c *CallGraphIndexer) findContainingFunction(file string, line int, language string) string {
-	// Query database for function that spans this line
-	symbols, err := c.db.GetFunctionSymbols(language)
-	if err != nil {
-		return ""
-	}
-
-	// Normalize file path for comparison
-	absFile, _ := filepath.Abs(file)
-
-	for _, sym := range symbols {
-		absSymFile, _ := filepath.Abs(sym.File)
-		if absSymFile != absFile {
-			continue
-		}
-
-		// Check if line is within function range
-		if sym.EndLine != nil {
-			if line >= sym.Line && line <= *sym.EndLine {
-				return sym.ID
-			}
-		} else {
-			// If no end line, just check if after start
-			if line >= sym.Line {
-				return sym.ID
-			}
-		}
-	}
-
-	return ""
+// callPass holds what one call-graph pass learns about each file.
+type callPass struct {
+	db          *db.Manager
+	language    string
+	root        lsp.Root
+	lines       *lsp.SourceLines
+	enc         lsp.PositionEncoding
+	symbols     map[string]fileSymbols
+	invocations map[string]map[position]bool
 }
 
-// Helper functions
-
-func readFileContent(path string) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
+func (p *callPass) fileSymbols(path string) (fileSymbols, error) {
+	if symbols, ok := p.symbols[path]; ok {
+		return symbols, nil
 	}
-	return string(data), nil
+	symbols, err := loadFileSymbols(p.db, path)
+	if err != nil {
+		return nil, err
+	}
+	p.symbols[path] = symbols
+	return symbols, nil
+}
+
+// reference stores the reference to callee at path:line:column as a call
+// when it is a validated invocation inside an indexed callable. It reports
+// whether a call was stored.
+func (p *callPass) reference(ctx context.Context, callee db.Symbol, path string, line, column int) (bool, error) {
+	if path == callee.File && line == callee.Line && column == callee.Column {
+		return false, nil // the declaration itself
+	}
+	symbols, err := p.fileSymbols(path)
+	if err != nil {
+		return false, err
+	}
+	if len(symbols) == 0 {
+		return false, nil // outside the indexed project
+	}
+	site := &db.Unresolved{Kind: "call", Language: p.language, TargetName: callee.Name, File: path, Line: line, Column: column}
+
+	sites, known := p.invocations[path]
+	if !known {
+		var checkable bool
+		sites, checkable, err = invocationSites(ctx, path, p.language)
+		if err != nil {
+			return false, err
+		}
+		if !checkable {
+			sites = nil
+		}
+		p.invocations[path] = sites
+	}
+	if sites == nil {
+		// No syntax to prove an invocation: recorded, never a call.
+		site.Reason = reasonUnvalidated
+		return false, p.db.InsertUnresolved(site)
+	}
+	if !sites[position{line, column}] {
+		return false, nil // a reference that is not a call (I06)
+	}
+
+	caller := symbols.enclosing(line, column, callableKinds)
+	if caller == nil {
+		site.Reason = reasonUnresolved
+		return false, p.db.InsertUnresolved(site)
+	}
+	err = p.db.InsertCall(&db.Call{
+		CallerID: caller.ID,
+		CalleeID: callee.ID,
+		File:     path,
+		Line:     line,
+		Column:   column,
+	})
+	return err == nil, nil
 }

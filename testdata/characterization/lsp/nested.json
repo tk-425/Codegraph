@@ -1,0 +1,33 @@
+{
+  "textDocument/references": [],
+  "textDocument/references@6": [
+    {
+      "uri": "${ROOT_URI}/nested.py",
+      "range": {
+        "start": {
+          "line": 2,
+          "character": 8
+        },
+        "end": {
+          "line": 2,
+          "character": 14
+        }
+      }
+    }
+  ],
+  "textDocument/references@1": [
+    {
+      "uri": "${ROOT_URI}/nested.py",
+      "range": {
+        "start": {
+          "line": 3,
+          "character": 4
+        },
+        "end": {
+          "line": 3,
+          "character": 9
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "textDocument/references": [],
+  "textDocument/references@0": [
+    {
+      "uri": "${ROOT_URI}/unvalidated.c",
+      "range": {
+        "start": {
+          "line": 1,
+          "character": 20
+        },
+        "end": {
+          "line": 1,
+          "character": 26
+        }
+      }
+    }
+  ]
+}

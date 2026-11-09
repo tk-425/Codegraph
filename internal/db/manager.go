@@ -457,7 +457,7 @@ func (m *Manager) GetFunctionSymbols(language string) ([]Symbol, error) {
 	query := `
 		SELECT ` + symbolColumns("") + `
 		FROM symbols
-		WHERE kind IN ('function', 'method') AND language = ?
+		WHERE kind IN ('function', 'method', 'constructor') AND language = ?
 		ORDER BY file, line`
 
 	rows, err := m.db.Query(query, language)

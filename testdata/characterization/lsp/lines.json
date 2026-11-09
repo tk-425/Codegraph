@@ -1,0 +1,46 @@
+{
+  "textDocument/references": [],
+  "textDocument/references@2": [
+    {
+      "uri": "${ROOT_URI}/lines.go",
+      "range": {
+        "start": {
+          "line": 2,
+          "character": 57
+        },
+        "end": {
+          "line": 2,
+          "character": 61
+        }
+      }
+    }
+  ],
+  "textDocument/references@4": [
+    {
+      "uri": "${ROOT_URI}/lines.go",
+      "range": {
+        "start": {
+          "line": 6,
+          "character": 16
+        },
+        "end": {
+          "line": 6,
+          "character": 22
+        }
+      }
+    },
+    {
+      "uri": "${ROOT_URI}/lines.go",
+      "range": {
+        "start": {
+          "line": 6,
+          "character": 26
+        },
+        "end": {
+          "line": 6,
+          "character": 32
+        }
+      }
+    }
+  ]
+}
