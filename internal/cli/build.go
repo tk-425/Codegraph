@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"os"
@@ -57,6 +56,7 @@ var buildCmd = &cobra.Command{
 
 func init() {
 	buildCmd.Flags().BoolVar(&forceFlag, "force", false, "Force full rebuild (delete and recreate database)")
+	supportJSON(buildCmd)
 	rootCmd.AddCommand(buildCmd)
 }
 
@@ -75,30 +75,32 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	// Get current directory
 	cwd, err := os.Getwd()
 	if err != nil {
-		return fmt.Errorf("failed to get current directory: %w", err)
+		return withCode("cwd_failed", fmt.Errorf("failed to get current directory: %w", err))
 	}
 
 	// Check if codegraph is initialized
 	codegraphDir := filepath.Join(cwd, ".codegraph")
 	if _, err := os.Stat(codegraphDir); os.IsNotExist(err) {
-		return fmt.Errorf("codegraph not initialized. Run 'codegraph init' first")
+		return withCode("not_initialized", fmt.Errorf("codegraph not initialized. Run 'codegraph init' first"))
 	}
 
 	// Load config
 	cfg, err := config.Load(cwd)
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		return withCode("config_load_failed", fmt.Errorf("failed to load config: %w", err))
 	}
+
+	ctx := commandContext(cmd)
 
 	// Scan for files
 	cgignorePath := filepath.Join(codegraphDir, ".cgignore")
 	scanner, err := indexer.NewScanner(cwd, cgignorePath)
 	if err != nil {
-		return fmt.Errorf("failed to prepare scanner: %w", err)
+		return withCode("scan_failed", fmt.Errorf("failed to prepare scanner: %w", err))
 	}
-	files, err := scanner.Scan()
+	files, err := scanner.Scan(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to scan files: %w", err)
+		return failure("scan_failed", fmt.Errorf("failed to scan files: %w", err))
 	}
 
 	languages := indexer.DetectedLanguages(files)
@@ -117,12 +119,12 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	dbPath := cfg.GetDatabasePath(cwd)
 	dbManager, err := db.NewManager(dbPath)
 	if err != nil {
-		return fmt.Errorf("failed to open database: %w", err)
+		return withCode("db_open_failed", fmt.Errorf("failed to open database: %w", err))
 	}
 	defer dbManager.Close()
 
 	if err := dbManager.Initialize(); err != nil {
-		return fmt.Errorf("failed to initialize database: %w", err)
+		return withCode("database_init_failed", fmt.Errorf("failed to initialize database: %w", err))
 	}
 
 	// Create indexer and run
@@ -130,11 +132,15 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	if jsonOutputFlag {
 		idx.SetProgressWriter(io.Discard)
 	}
-	defer idx.Close()
+	defer func() {
+		// IndexProject shuts servers down itself; this covers early returns.
+		if err := idx.Close(); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: LSP cleanup: %v\n", err)
+		}
+	}()
 
-	ctx := context.Background()
 	if err := idx.IndexProject(ctx, files, forceFlag); err != nil {
-		return fmt.Errorf("indexing failed: %w", err)
+		return failure("index_failed", fmt.Errorf("indexing failed: %w", err))
 	}
 
 	diagnostics := idx.Diagnostics()

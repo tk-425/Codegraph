@@ -1,15 +1,12 @@
 package cli
 
 import (
-	"context"
 	"fmt"
-	"os"
+	"io"
 	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/tk-425/Codegraph/internal/config"
-	"github.com/tk-425/Codegraph/internal/db"
 	"github.com/tk-425/Codegraph/internal/search"
 )
 
@@ -41,6 +38,7 @@ func init() {
 	searchCmd.Flags().StringVar(&searchLangFlag, "lang", "", "Filter by language(s), comma-separated (e.g., go,python)")
 	searchCmd.Flags().IntVar(&searchLimitFlag, "limit", 20, "Max results to show")
 	searchCmd.Flags().BoolVar(&searchExactFlag, "exact", false, "Require exact name match")
+	supportJSON(searchCmd)
 	rootCmd.AddCommand(searchCmd)
 }
 
@@ -61,29 +59,9 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		return runSearchJSON(cmd, symbol)
 	}
 
-	// Get current directory
-	cwd, err := os.Getwd()
+	cwd, _, dbManager, _, err := openProject()
 	if err != nil {
-		return fmt.Errorf("failed to get current directory: %w", err)
-	}
-
-	// Check if codegraph is initialized
-	codegraphDir := filepath.Join(cwd, ".codegraph")
-	if _, err := os.Stat(codegraphDir); os.IsNotExist(err) {
-		return fmt.Errorf("codegraph not initialized. Run 'codegraph init' first")
-	}
-
-	// Load config
-	cfg, err := config.Load(cwd)
-	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
-	}
-
-	// Open database
-	dbPath := cfg.GetDatabasePath(cwd)
-	dbManager, err := db.NewManager(dbPath)
-	if err != nil {
-		return fmt.Errorf("failed to open database: %w", err)
+		return err
 	}
 	defer dbManager.Close()
 
@@ -110,11 +88,11 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	}
 
 	// Execute search
-	ctx := context.Background()
-	results, err := orchestrator.Search(ctx, opts)
+	results, failures, err := orchestrator.Search(commandContext(cmd), opts)
 	if err != nil {
 		return fmt.Errorf("search failed: %w", err)
 	}
+	warnTierFailures(cmd.ErrOrStderr(), failures)
 
 	if len(results) == 0 {
 		fmt.Printf("🔍 No results found for: %s\n", Warning(symbol))
@@ -152,7 +130,7 @@ func runSearchJSON(cmd *cobra.Command, symbol string) error {
 		return err
 	}
 
-	cwd, _, dbManager, code, err := openProject(false)
+	cwd, _, dbManager, code, err := openProject()
 	if err != nil {
 		return emitErr(code, err)
 	}
@@ -175,10 +153,11 @@ func runSearchJSON(cmd *cobra.Command, symbol string) error {
 		ExactMatch: searchExactFlag,
 	}
 
-	results, err := orchestrator.Search(context.Background(), opts)
+	results, failures, err := orchestrator.Search(commandContext(cmd), opts)
 	if err != nil {
-		return emitErr("search_failed", fmt.Errorf("search failed: %w", err))
+		return emitErr(failureCode("search_failed", err), fmt.Errorf("search failed: %w", err))
 	}
+	warnTierFailures(cmd.ErrOrStderr(), failures)
 
 	records := make([]searchRecord, 0, len(results))
 	for _, r := range results {
@@ -197,4 +176,12 @@ func runSearchJSON(cmd *cobra.Command, symbol string) error {
 	}
 
 	return EmitJSON(out, "search", &symbol, records, nil)
+}
+
+// warnTierFailures reports tiers that failed before a later tier answered.
+// Warnings go to stderr so stdout carries only the command's output.
+func warnTierFailures(w io.Writer, failures []search.TierFailure) {
+	for _, failure := range failures {
+		fmt.Fprintf(w, "warning: %s search tier failed: %v\n", failure.Tier, failure.Err)
+	}
 }

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,19 +13,42 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
+
+	"github.com/tk-425/Codegraph/internal/config"
 )
 
-// Client is a JSON-RPC 2.0 client for LSP communication
+// ErrTransportClosed reports that a client can no longer exchange messages:
+// the server exited, sent a malformed frame, or a write was abandoned.
+var ErrTransportClosed = errors.New("lsp transport closed")
+
+// maxFrameBytes bounds a single server message.
+const maxFrameBytes = 64 << 20
+
+// Client is a JSON-RPC 2.0 client for LSP communication. It owns its server
+// process: one reaper goroutine waits on it, and any transport failure kills it.
 type Client struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
 	reader *bufio.Reader
 
+	writeMu     sync.Mutex
 	mu          sync.Mutex
 	nextID      int64
 	pending     map[int64]chan *Response
 	initialized bool
+
+	closeOnce sync.Once
+	closed    chan struct{}
+	closeErr  error
+
+	// exited is closed once the reaper's Wait returns.
+	exited chan struct{}
+
+	requestTimeout  time.Duration
+	gracefulTimeout time.Duration
+	forceTimeout    time.Duration
 
 	// logMu guards the server log buffer separately from mu so the reader
 	// goroutine never contends with the pending map or stdin writes.
@@ -68,11 +92,22 @@ type ResponseError struct {
 	Data    any    `json:"data,omitempty"`
 }
 
+// methodNotFound is the JSON-RPC code a server returns for a request it does
+// not support.
+const methodNotFound = -32601
+
+// IsUnsupported reports whether err is a server's "method not found" reply:
+// an unsupported capability rather than a failed request.
+func IsUnsupported(err error) bool {
+	var responseErr *ResponseError
+	return errors.As(err, &responseErr) && responseErr.Code == methodNotFound
+}
+
 func (e *ResponseError) Error() string {
 	return fmt.Sprintf("LSP error %d: %s", e.Code, e.Message)
 }
 
-// NewClient creates a new LSP client
+// NewClient starts an LSP server and returns a client that owns it.
 func NewClient(command string, args []string, rootURI, language string) (*Client, error) {
 	cmd := exec.Command(command, args...)
 
@@ -83,37 +118,95 @@ func NewClient(command string, args []string, rootURI, language string) (*Client
 		cmd.Stderr = io.Discard
 	}
 
-	stdin, err := cmd.StdinPipe()
+	// Own both pipe ends so Wait never closes the reader before it drains.
+	childStdin, stdin, err := os.Pipe()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get stdin pipe: %w", err)
+		return nil, fmt.Errorf("failed to create stdin pipe: %w", err)
 	}
-
-	stdout, err := cmd.StdoutPipe()
+	stdout, childStdout, err := os.Pipe()
 	if err != nil {
-		stdin.Close()
-		return nil, fmt.Errorf("failed to get stdout pipe: %w", err)
+		_ = childStdin.Close()
+		_ = stdin.Close()
+		return nil, fmt.Errorf("failed to create stdout pipe: %w", err)
 	}
+	cmd.Stdin = childStdin
+	cmd.Stdout = childStdout
 
-	if err := cmd.Start(); err != nil {
-		stdin.Close()
-		stdout.Close()
+	// The child holds its own copies; the parent keeps only its pipe ends.
+	err = cmd.Start()
+	_ = childStdin.Close()
+	_ = childStdout.Close()
+	if err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
 		return nil, fmt.Errorf("failed to start LSP server: %w", err)
 	}
 
-	client := &Client{
-		cmd:      cmd,
-		stdin:    stdin,
-		stdout:   stdout,
-		reader:   bufio.NewReader(stdout),
-		pending:  make(map[int64]chan *Response),
-		Language: language,
-		RootURI:  rootURI,
-	}
-
-	// Start response reader goroutine
+	client := newClient(stdin, stdout, rootURI, language)
+	client.cmd = cmd
+	client.exited = make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(client.exited)
+	}()
 	go client.readResponses()
 
 	return client, nil
+}
+
+// newClient starts with the default budgets; the manager applies configured ones.
+func newClient(stdin io.WriteCloser, stdout io.ReadCloser, rootURI, language string) *Client {
+	budgets := config.DefaultConfig().LSPTimeouts
+	return &Client{
+		stdin:           stdin,
+		stdout:          stdout,
+		reader:          bufio.NewReader(stdout),
+		pending:         make(map[int64]chan *Response),
+		closed:          make(chan struct{}),
+		requestTimeout:  budgets.Request(),
+		gracefulTimeout: budgets.ShutdownGraceful(),
+		forceTimeout:    budgets.ShutdownForce(),
+		Language:        language,
+		RootURI:         rootURI,
+	}
+}
+
+// Executable returns the server command path, or "" when there is none.
+func (c *Client) Executable() string {
+	if c.cmd == nil {
+		return ""
+	}
+	return c.cmd.Path
+}
+
+// Err returns the transport failure once the client is closed, else nil.
+func (c *Client) Err() error {
+	select {
+	case <-c.closed:
+		return c.closeErr
+	default:
+		return nil
+	}
+}
+
+// fail closes the transport once, failing every pending and future request
+// and killing the owned server. The reaper still performs the only Wait.
+func (c *Client) fail(cause error) {
+	c.closeOnce.Do(func() {
+		c.closeErr = fmt.Errorf("%w: %v", ErrTransportClosed, cause)
+		if c.closed != nil { // nil only for zero-value test fakes
+			close(c.closed)
+		}
+		if c.stdin != nil {
+			_ = c.stdin.Close()
+		}
+		if c.stdout != nil {
+			_ = c.stdout.Close()
+		}
+		if c.cmd != nil && c.cmd.Process != nil {
+			_ = c.cmd.Process.Kill()
+		}
+	})
 }
 
 // logMessageCap bounds the retained server log messages per client.
@@ -137,7 +230,7 @@ func (c *Client) recordLogMessage(severity DiagnosticSeverity, message string) {
 	c.logSeen[message] = struct{}{}
 	c.logMessages = append(c.logMessages, LSPDiagnostic{
 		Language:   c.Language,
-		Executable: c.cmd.Path,
+		Executable: c.Executable(),
 		Category:   ServerLog,
 		Severity:   severity,
 		Reason:     message,
@@ -154,7 +247,8 @@ func (c *Client) DrainLogMessages() []LSPDiagnostic {
 	return drained
 }
 
-// Initialize sends the initialize request to the LSP server
+// Initialize sends the initialize request to the LSP server. The caller's
+// context is its only budget; initialization is not an ordinary request.
 func (c *Client) Initialize(ctx context.Context) (*InitializeResult, error) {
 	params := InitializeParams{
 		ProcessID:    os.Getpid(),
@@ -163,7 +257,7 @@ func (c *Client) Initialize(ctx context.Context) (*InitializeResult, error) {
 	}
 
 	var result InitializeResult
-	if err := c.Call(ctx, "initialize", params, &result); err != nil {
+	if err := c.call(ctx, "initialize", params, &result); err != nil {
 		return nil, err
 	}
 
@@ -176,42 +270,76 @@ func (c *Client) Initialize(ctx context.Context) (*InitializeResult, error) {
 	return &result, nil
 }
 
-// Shutdown sends shutdown request and exit notification
+// Shutdown asks the server to exit within the graceful budget, then kills it
+// and waits for the reap within the forced budget. An earlier ctx deadline
+// shortens only the graceful phase; forced termination always runs.
 func (c *Client) Shutdown(ctx context.Context) error {
-	if !c.initialized {
+	graceful, cancel := context.WithTimeout(ctx, c.gracefulTimeout)
+	defer cancel()
+
+	if c.initialized && c.Err() == nil {
+		_ = c.call(graceful, "shutdown", nil, nil)
+		_ = c.notify(graceful, "exit", nil)
+	}
+	if c.stdin != nil {
+		// EOF tells a server that missed exit to stop.
+		_ = c.stdin.Close()
+	}
+	select {
+	case <-c.exited:
+	case <-graceful.Done():
+	}
+	return c.Close()
+}
+
+// Close kills a server that is still running and waits for its reap within
+// the forced budget. Shutdown calls it after the graceful phase.
+func (c *Client) Close() error {
+	killed := false
+	if c.exited != nil {
+		select {
+		case <-c.exited:
+		default:
+			killed = true
+		}
+	}
+	c.fail(errors.New("client closed"))
+	if c.exited == nil {
 		return nil
 	}
-
-	// Send shutdown request
-	var result any
-	if err := c.Call(ctx, "shutdown", nil, &result); err != nil {
-		// Server may already be dead or unresponsive; nothing to do.
-	}
-
-	// Send exit notification
-	c.Notify("exit", nil)
-
-	// Wait for process to exit before closing pipes. This allows the server
-	// to send final notifications (e.g. window/logMessage during cleanup)
-	// without hitting "Connection is closed" errors.
-	done := make(chan struct{})
-	go func() {
-		c.cmd.Wait()
-		close(done)
-	}()
+	timer := time.NewTimer(c.forceTimeout)
+	defer timer.Stop()
 	select {
-	case <-done:
-	case <-ctx.Done():
+	case <-c.exited:
+	case <-timer.C:
+		return fmt.Errorf("%s server was not reaped within %s of being killed", c.Language, c.forceTimeout)
 	}
-
-	c.stdin.Close()
-	_ = c.stdout.Close()
-
+	if killed {
+		return fmt.Errorf("%s server was still running and was killed", c.Language)
+	}
 	return nil
 }
 
-// Call sends a request and waits for response
+// Call sends a request and waits for its response within the request budget.
 func (c *Client) Call(ctx context.Context, method string, params, result any) error {
+	ctx, cancel := c.withRequestBudget(ctx)
+	defer cancel()
+	return c.call(ctx, method, params, result)
+}
+
+// withRequestBudget bounds ctx by the request budget; an earlier parent
+// deadline still wins.
+func (c *Client) withRequestBudget(ctx context.Context) (context.Context, context.CancelFunc) {
+	if c.requestTimeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, c.requestTimeout)
+}
+
+func (c *Client) call(ctx context.Context, method string, params, result any) error {
+	if err := c.Err(); err != nil {
+		return err
+	}
 	id := atomic.AddInt64(&c.nextID, 1)
 
 	req := Request{
@@ -233,91 +361,116 @@ func (c *Client) Call(ctx context.Context, method string, params, result any) er
 		c.mu.Unlock()
 	}()
 
-	// Send request
-	if err := c.send(req); err != nil {
+	if err := c.writeFrame(ctx, req); err != nil {
 		return err
 	}
 
-	// Wait for response
 	select {
-	case <-ctx.Done():
-		return ctx.Err()
 	case resp := <-respChan:
-		if resp.Error != nil {
-			return resp.Error
+		return decodeResponse(resp, result)
+	case <-ctx.Done():
+		go c.cancelRequest(id)
+		return ctx.Err()
+	case <-c.closed:
+		// Prefer a response that arrived just before the transport closed.
+		select {
+		case resp := <-respChan:
+			return decodeResponse(resp, result)
+		default:
+			return c.closeErr
 		}
-		if result != nil && len(resp.Result) > 0 {
-			return json.Unmarshal(resp.Result, result)
-		}
-		return nil
 	}
 }
 
-// Notify sends a notification (no response expected)
+func decodeResponse(resp *Response, result any) error {
+	if resp.Error != nil {
+		return resp.Error
+	}
+	if result != nil && len(resp.Result) > 0 {
+		return json.Unmarshal(resp.Result, result)
+	}
+	return nil
+}
+
+// cancelRequest tells the server a request was abandoned. It is best effort:
+// skipped when another write is in progress, and bounded like any write so a
+// server that stopped reading cannot hold the write lock indefinitely.
+func (c *Client) cancelRequest(id int64) {
+	if !c.writeMu.TryLock() {
+		return
+	}
+	defer c.writeMu.Unlock()
+	ctx, cancel := c.withRequestBudget(context.Background())
+	defer cancel()
+	_ = c.writeFrameLocked(ctx, Request{JSONRPC: "2.0", Method: "$/cancelRequest", Params: map[string]int64{"id": id}})
+}
+
+// Notify sends a notification (no response expected) within the request budget.
 func (c *Client) Notify(method string, params any) error {
-	req := Request{
-		JSONRPC: "2.0",
-		Method:  method,
-		Params:  params,
-	}
-	return c.send(req)
+	ctx, cancel := c.withRequestBudget(context.Background())
+	defer cancel()
+	return c.notify(ctx, method, params)
 }
 
-// send writes a request to the LSP server
-func (c *Client) send(req Request) error {
-	data, err := json.Marshal(req)
+func (c *Client) notify(ctx context.Context, method string, params any) error {
+	return c.writeFrame(ctx, Request{JSONRPC: "2.0", Method: method, Params: params})
+}
+
+// writeFrame writes one message. If ctx ends mid-write the frame may be
+// partial, so the transport is closed rather than left unframed.
+func (c *Client) writeFrame(ctx context.Context, message any) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.writeFrameLocked(ctx, message)
+}
+
+func (c *Client) writeFrameLocked(ctx context.Context, message any) error {
+	if err := c.Err(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	stop := context.AfterFunc(ctx, func() { c.fail(ctx.Err()) })
+	err := c.writeLocked(message)
+	if !stop() {
+		return ctx.Err()
+	}
+	if err != nil {
+		c.fail(err)
+		return c.closeErr
+	}
+	return nil
+}
+
+func (c *Client) writeLocked(message any) error {
+	data, err := json.Marshal(message)
 	if err != nil {
 		return fmt.Errorf("failed to marshal request: %w", err)
 	}
-
-	header := fmt.Sprintf("Content-Length: %d\r\n\r\n", len(data))
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if _, err := io.WriteString(c.stdin, header); err != nil {
+	if _, err := fmt.Fprintf(c.stdin, "Content-Length: %d\r\n\r\n", len(data)); err != nil {
 		return fmt.Errorf("failed to write header: %w", err)
 	}
 	if _, err := c.stdin.Write(data); err != nil {
 		return fmt.Errorf("failed to write body: %w", err)
 	}
-
 	return nil
 }
 
-// readResponses reads responses from the LSP server
+// readResponses reads server messages until the transport fails, then fails
+// every pending request with the cause.
 func (c *Client) readResponses() {
 	for {
-		// Read headers
-		contentLength := 0
-		for {
-			line, err := c.reader.ReadString('\n')
-			if err != nil {
-				return
-			}
-			line = strings.TrimSpace(line)
-			if line == "" {
-				break // End of headers
-			}
-			if strings.HasPrefix(line, "Content-Length:") {
-				lenStr := strings.TrimSpace(strings.TrimPrefix(line, "Content-Length:"))
-				contentLength, _ = strconv.Atoi(lenStr)
-			}
-		}
-
-		if contentLength == 0 {
-			continue
-		}
-
-		// Read body
-		body := make([]byte, contentLength)
-		if _, err := io.ReadFull(c.reader, body); err != nil {
+		body, err := c.readFrame()
+		if err != nil {
+			c.fail(err)
 			return
 		}
 
 		var message wireMessage
 		if err := json.Unmarshal(body, &message); err != nil {
-			continue
+			c.fail(fmt.Errorf("malformed message body: %w", err))
+			return
 		}
 		if message.Method == "window/logMessage" {
 			var params LogMessageParams
@@ -346,15 +499,50 @@ func (c *Client) readResponses() {
 		}
 		resp := Response{JSONRPC: message.JSONRPC, ID: id, Result: message.Result, Error: message.Error}
 
-		// Dispatch to waiting caller
+		// Dispatch to waiting caller; a duplicate response is dropped.
 		if resp.ID > 0 {
 			c.mu.Lock()
 			if ch, ok := c.pending[resp.ID]; ok {
-				ch <- &resp
+				select {
+				case ch <- &resp:
+				default:
+				}
 			}
 			c.mu.Unlock()
 		}
 	}
+}
+
+// readFrame reads one Content-Length framed body.
+func (c *Client) readFrame() ([]byte, error) {
+	contentLength := -1
+	for {
+		line, err := c.reader.ReadString('\n')
+		if err != nil {
+			return nil, err
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			break // End of headers
+		}
+		if value, ok := strings.CutPrefix(line, "Content-Length:"); ok {
+			contentLength, err = strconv.Atoi(strings.TrimSpace(value))
+			if err != nil {
+				return nil, fmt.Errorf("malformed Content-Length %q", value)
+			}
+		}
+	}
+	if contentLength <= 0 {
+		return nil, fmt.Errorf("missing or invalid Content-Length")
+	}
+	if contentLength > maxFrameBytes {
+		return nil, fmt.Errorf("frame of %d bytes exceeds %d byte limit", contentLength, maxFrameBytes)
+	}
+	body := make([]byte, contentLength)
+	if _, err := io.ReadFull(c.reader, body); err != nil {
+		return nil, err
+	}
+	return body, nil
 }
 
 func (c *Client) respondToServerRequest(id json.RawMessage, method string) error {
@@ -368,7 +556,7 @@ func (c *Client) respondToServerRequest(id json.RawMessage, method string) error
 	case "workspace/workspaceFolders":
 		result = []map[string]string{{"uri": c.RootURI, "name": "workspace"}}
 	default:
-		responseErr = &ResponseError{Code: -32601, Message: "method not found"}
+		responseErr = &ResponseError{Code: methodNotFound, Message: "method not found"}
 	}
 
 	response := struct {
@@ -377,18 +565,9 @@ func (c *Client) respondToServerRequest(id json.RawMessage, method string) error
 		Result  any             `json:"result,omitempty"`
 		Error   *ResponseError  `json:"error,omitempty"`
 	}{JSONRPC: "2.0", ID: id, Result: result, Error: responseErr}
-	data, err := json.Marshal(response)
-	if err != nil {
-		return err
-	}
-	header := fmt.Sprintf("Content-Length: %d\r\n\r\n", len(data))
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if _, err := io.WriteString(c.stdin, header); err != nil {
-		return err
-	}
-	_, err = c.stdin.Write(data)
-	return err
+	ctx, cancel := c.withRequestBudget(context.Background())
+	defer cancel()
+	return c.writeFrame(ctx, response)
 }
 
 // DocumentSymbols requests symbols from a document

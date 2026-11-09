@@ -21,9 +21,16 @@ type request struct {
 }
 
 func main() {
-	mode := flag.String("mode", "normal", "normal, exit-on-probe, block-after-initialize, or ignore-exit")
+	mode := flag.String("mode", "normal", "normal, exit-on-probe, block-after-initialize, ignore-exit, or <framing>-on-probe")
 	fixture := flag.String("responses", "", "method-to-result JSON fixture")
+	pidfile := flag.String("pidfile", "", "write this process ID to the file before serving")
 	flag.Parse()
+	if *pidfile != "" {
+		if err := os.WriteFile(*pidfile, []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+	}
 	if err := serve(*mode, *fixture); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
@@ -64,6 +71,12 @@ func serve(mode, fixture string) error {
 		if message.Method == "probe" && mode == "exit-on-probe" {
 			return nil
 		}
+		if frame, ok := malformedFrames[mode]; ok && message.Method == "probe" {
+			if _, err := io.WriteString(os.Stdout, frame); err != nil {
+				return err
+			}
+			hang()
+		}
 
 		key := message.Method
 		var params struct {
@@ -102,11 +115,24 @@ func serve(mode, fixture string) error {
 			escapedURI := string(encoded[1 : len(encoded)-1])
 			result = json.RawMessage(strings.ReplaceAll(string(configured), "${ROOT_URI}", escapedURI))
 		}
-		response, err := json.Marshal(struct {
-			JSONRPC string          `json:"jsonrpc"`
-			ID      json.RawMessage `json:"id"`
-			Result  json.RawMessage `json:"result"`
-		}{"2.0", message.ID, result})
+		// A configured {"__error__": {...}} answers with a JSON-RPC error.
+		var configuredError struct {
+			Error json.RawMessage `json:"__error__"`
+		}
+		var response []byte
+		if json.Unmarshal(result, &configuredError) == nil && len(configuredError.Error) > 0 {
+			response, err = json.Marshal(struct {
+				JSONRPC string          `json:"jsonrpc"`
+				ID      json.RawMessage `json:"id"`
+				Error   json.RawMessage `json:"error"`
+			}{"2.0", message.ID, configuredError.Error})
+		} else {
+			response, err = json.Marshal(struct {
+				JSONRPC string          `json:"jsonrpc"`
+				ID      json.RawMessage `json:"id"`
+				Result  json.RawMessage `json:"result"`
+			}{"2.0", message.ID, result})
+		}
 		if err != nil {
 			return err
 		}
@@ -117,6 +143,14 @@ func serve(mode, fixture string) error {
 			hang()
 		}
 	}
+}
+
+// Framing violations sent in place of a probe response.
+var malformedFrames = map[string]string{
+	"bad-length-on-probe": "Content-Length: abc\r\n\r\n{}",
+	"no-length-on-probe":  "Content-Type: application/json\r\n\r\n{}",
+	"oversized-on-probe":  "Content-Length: 999999999999\r\n\r\n",
+	"bad-json-on-probe":   "Content-Length: 5\r\n\r\n{nope",
 }
 
 func readMessage(reader *bufio.Reader) (request, error) {

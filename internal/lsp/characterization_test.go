@@ -43,30 +43,17 @@ func startCharacterizationPeer(t *testing.T, binary, mode string) (*Client, *boo
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Shutdown starts the client's Wait goroutine. Cleanup must not Wait twice.
+	// The client reaps its own child exactly once; cleanup kills the peer and
+	// waits for that reap rather than calling Wait a second time.
 	clientOwnsWait := new(bool)
 	t.Cleanup(func() {
 		_ = client.cmd.Process.Kill()
 		_ = client.stdin.Close()
 		_ = client.stdout.Close()
-		if !*clientOwnsWait {
-			_ = client.cmd.Wait()
-			return
-		}
-		deadline := time.NewTimer(characterizationWatchdog)
-		defer deadline.Stop()
-		tick := time.NewTicker(time.Millisecond)
-		defer tick.Stop()
-		for {
-			if err := client.cmd.Process.Signal(syscall.Signal(0)); errors.Is(err, os.ErrProcessDone) {
-				return
-			}
-			select {
-			case <-deadline.C:
-				t.Error("harness cleanup: client did not reap its killed peer")
-				return
-			case <-tick.C:
-			}
+		select {
+		case <-client.exited:
+		case <-time.After(characterizationWatchdog):
+			t.Error("harness cleanup: client did not reap its killed peer")
 		}
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), characterizationSetupBudget)

@@ -1,6 +1,7 @@
 package ignore_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,7 +69,7 @@ func TestScannerUsesSeededCGIgnore(t *testing.T) {
 		t.Fatalf("NewScanner: %v", err)
 	}
 
-	files, err := scanner.Scan()
+	files, err := scanner.Scan(context.Background())
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -120,7 +121,7 @@ func TestScannerNegationDoesNotDisableUnrelatedDirPruning(t *testing.T) {
 		t.Fatalf("NewScanner: %v", err)
 	}
 
-	files, err := scanner.Scan()
+	files, err := scanner.Scan(context.Background())
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -157,7 +158,7 @@ func TestScannerSupportsNegationWithoutSkippingDir(t *testing.T) {
 		t.Fatalf("NewScanner: %v", err)
 	}
 
-	files, err := scanner.Scan()
+	files, err := scanner.Scan(context.Background())
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}

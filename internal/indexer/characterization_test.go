@@ -68,7 +68,7 @@ func (p *characterizationProject) build(t *testing.T, force bool) error {
 	if err != nil {
 		t.Fatal(err)
 	}
-	files, err := scanner.Scan()
+	files, err := scanner.Scan(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +233,7 @@ func characterizationPeerManager(t *testing.T, p *characterizationProject, langu
 	}
 	rootURI := (&url.URL{Scheme: "file", Path: p.root}).String()
 	manager := lsp.NewManager(p.cfg, rootURI)
-	t.Cleanup(manager.ShutdownAll)
+	t.Cleanup(func() { _ = manager.ShutdownAll() })
 	return manager
 }
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/pelletier/go-toml/v2"
 )
@@ -13,9 +14,43 @@ const DefaultConfigDir = ".codegraph"
 
 // Config represents the codegraph configuration
 type Config struct {
-	LSP      map[string]LSPConfig `toml:"lsp"`
-	Search   SearchConfig         `toml:"search"`
-	Database DatabaseConfig       `toml:"database"`
+	LSP         map[string]LSPConfig `toml:"lsp"`
+	LSPTimeouts LSPTimeoutsConfig    `toml:"lsp_timeouts"`
+	Search      SearchConfig         `toml:"search"`
+	Database    DatabaseConfig       `toml:"database"`
+}
+
+// LSPTimeoutsConfig bounds ordinary requests and per-server cleanup. Server
+// initialization keeps its own fixed per-attempt budget.
+type LSPTimeoutsConfig struct {
+	RequestSeconds          int `toml:"request_seconds"`
+	ShutdownGracefulSeconds int `toml:"shutdown_graceful_seconds"`
+	ShutdownForceSeconds    int `toml:"shutdown_force_seconds"`
+}
+
+func (t LSPTimeoutsConfig) Request() time.Duration {
+	return time.Duration(t.RequestSeconds) * time.Second
+}
+
+func (t LSPTimeoutsConfig) ShutdownGraceful() time.Duration {
+	return time.Duration(t.ShutdownGracefulSeconds) * time.Second
+}
+
+func (t LSPTimeoutsConfig) ShutdownForce() time.Duration {
+	return time.Duration(t.ShutdownForceSeconds) * time.Second
+}
+
+func (t LSPTimeoutsConfig) validate() error {
+	for name, seconds := range map[string]int{
+		"request_seconds":           t.RequestSeconds,
+		"shutdown_graceful_seconds": t.ShutdownGracefulSeconds,
+		"shutdown_force_seconds":    t.ShutdownForceSeconds,
+	} {
+		if seconds <= 0 {
+			return fmt.Errorf("lsp_timeouts.%s must be positive, got %d", name, seconds)
+		}
+	}
+	return nil
 }
 
 // LSPConfig represents an LSP server configuration
@@ -71,6 +106,11 @@ func DefaultConfig() *Config {
 				Args:    []string{},
 			},
 		},
+		LSPTimeouts: LSPTimeoutsConfig{
+			RequestSeconds:          30,
+			ShutdownGracefulSeconds: 5,
+			ShutdownForceSeconds:    5,
+		},
 		Search: SearchConfig{
 			TimeoutSeconds: 30,
 		},
@@ -97,6 +137,9 @@ func Load(projectRoot string) (*Config, error) {
 	cfg := DefaultConfig()
 	if err := toml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse config: %w", err)
+	}
+	if err := cfg.LSPTimeouts.validate(); err != nil {
+		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 
 	return cfg, nil

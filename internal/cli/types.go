@@ -29,6 +29,7 @@ func init() {
 	typesCmd.Flags().BoolVar(&typesSupertypesFlag, "supertypes", false, "Show parent types (superclasses, interfaces)")
 	typesCmd.Flags().BoolVar(&typesSubtypesFlag, "subtypes", false, "Show child types (subclasses, implementors)")
 	typesCmd.Flags().StringVar(&typesLangFlag, "lang", "", "Filter by language(s), comma-separated")
+	supportJSON(typesCmd)
 	rootCmd.AddCommand(typesCmd)
 }
 

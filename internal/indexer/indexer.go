@@ -23,7 +23,68 @@ type Indexer struct {
 	rootPath    string
 	rootURI     string
 	diagnostics []lsp.LSPDiagnostic
-	progress    io.Writer
+	// phaseDiagnostics holds request failures attributed to a phase during
+	// the current IndexProject call.
+	phaseDiagnostics []lsp.LSPDiagnostic
+	progress         io.Writer
+}
+
+// requestFailures counts the failed LSP requests of one phase and language.
+// Unsupported-method replies are not failures and are not counted.
+type requestFailures struct {
+	executable string
+	count      int
+	first      error
+}
+
+func (f *requestFailures) add(client *lsp.Client, err error) {
+	if lsp.IsUnsupported(err) {
+		return
+	}
+	if f.count == 0 {
+		f.executable = client.Executable()
+		f.first = err
+	}
+	f.count++
+}
+
+// recordRequestFailures keeps failed requests visible even when other
+// requests in the phase succeeded.
+func (i *Indexer) recordRequestFailures(phase, language string, failures requestFailures) {
+	if failures.count == 0 {
+		return
+	}
+	i.phaseDiagnostics = append(i.phaseDiagnostics, lsp.LSPDiagnostic{
+		Language:   language,
+		Executable: failures.executable,
+		Category:   lsp.RequestFailed,
+		Severity:   lsp.SeverityWarning,
+		Reason:     fmt.Sprintf("%s phase: %d LSP request(s) failed; affected results used fallback or were omitted; first error: %v", phase, failures.count, failures.first),
+	})
+}
+
+// serverSettleDelay is a fixed pause some servers need after initialization
+// before answering for the whole project. It is not readiness detection.
+var serverSettleDelay = map[string]time.Duration{
+	"rust":  10 * time.Second,
+	"java":  10 * time.Second,
+	"swift": 10 * time.Second,
+	"ocaml": 10 * time.Second,
+}
+
+func waitForServerSettle(ctx context.Context, language string) error {
+	delay, ok := serverSettleDelay[language]
+	if !ok {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // NewIndexer creates a new indexer
@@ -47,8 +108,13 @@ func NewIndexer(cfg *config.Config, dbManager *db.Manager, rootPath string) *Ind
 // nothing but their own payload.
 func (i *Indexer) SetProgressWriter(w io.Writer) { i.progress = w }
 
-// IndexProject indexes all source files in the project
+// IndexProject indexes all source files in the project. Cancellation stops
+// it between files and requests and returns the context error.
 func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool) error {
+	i.phaseDiagnostics = nil
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if force {
 		if err := i.db.ClearAll(); err != nil {
 			return fmt.Errorf("failed to clear database: %w", err)
@@ -69,24 +135,19 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 		langLSP := 0
 		langTreeSitter := 0
 
-		// Get LSP client for this language
-		client, err := i.lsp.GetClient(ctx, language)
-		// If err != nil, client is nil. Proceed to fallback.
-		_ = err // LSP failures are recorded by the manager; indexing continues with fallback.
-
-		// Some LSP servers need time to analyze the project after initialization
-		switch language {
-		case "rust":
-			time.Sleep(10 * time.Second)
-		case "java":
-			time.Sleep(10 * time.Second)
-		case "swift":
-			time.Sleep(10 * time.Second)
-		case "ocaml":
-			time.Sleep(10 * time.Second)
+		// Get LSP client for this language. Startup failures are recorded by
+		// the manager; indexing continues with fallback.
+		client, _ := i.lsp.GetClient(ctx, language)
+		if err := ctx.Err(); err != nil {
+			return err
 		}
+		settled := false
+		var symbolFailures requestFailures
 
 		for idx, file := range langFiles {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			// Check if file needs re-indexing (incremental build)
 			if !force {
 				if skip, _ := i.shouldSkipFile(file); skip {
@@ -104,7 +165,20 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 			var err error
 
 			if client != nil {
+				// Settle only once a live server has files to index.
+				if !settled {
+					if err := waitForServerSettle(ctx, language); err != nil {
+						return err
+					}
+					settled = true
+				}
 				symbols, err = i.indexFile(ctx, client, file)
+				if err != nil {
+					if ctxErr := ctx.Err(); ctxErr != nil {
+						return ctxErr
+					}
+					symbolFailures.add(client, err)
+				}
 			} else {
 				// No LSP client, force fallback
 				err = fmt.Errorf("no LSP client")
@@ -112,10 +186,6 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 
 			// Fallback if error OR if LSP returned 0 symbols (likely failed to process)
 			if err != nil || symbols == 0 {
-				if err != nil && client != nil {
-					// Log real LSP errors (but sparse errors like 'no LSP client' are expected)
-				}
-
 				// Try tree-sitter fallback
 				tsIndexer := NewTreeSitterIndexer(i.db, i.rootPath)
 				tsSymbols, tsErr := tsIndexer.IndexFile(ctx, file)
@@ -147,6 +217,7 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 		} else if langSkipped > 0 {
 			fmt.Fprintf(i.progress, "\r   [%s] 0 indexed, %d skipped (unchanged)         \n", language, langSkipped)
 		}
+		i.recordRequestFailures("symbols", language, symbolFailures)
 	}
 
 	// Index call graph for each language
@@ -157,6 +228,10 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 	for language := range groups {
 		// Try LSP-based call graph first
 		calls, err := callGraphIndexer.IndexCallGraph(ctx, language)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		i.recordRequestFailures("calls", language, callGraphIndexer.failures)
 		if err != nil || calls == 0 {
 			// LSP failed or returned nothing, try tree-sitter
 			for _, file := range groups[language] {
@@ -183,6 +258,10 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 	// Try LSP-based hierarchy first, fall back to tree-sitter if no results
 	for language := range groups {
 		count, err := hierarchyIndexer.IndexHierarchyLSP(ctx, language)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		i.recordRequestFailures("hierarchy", language, hierarchyIndexer.failures)
 		if err != nil || count == 0 {
 			// LSP hierarchy failed or returned nothing, try tree-sitter
 			for _, file := range groups[language] {
@@ -197,11 +276,21 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 	}
 	fmt.Fprintf(i.progress, "   Found %d type relationships\n", totalHierarchy)
 
-	// Preserve one diagnostic per language for the build boundary.
-	i.diagnostics = i.lsp.Diagnostics()
-
-	// Shutdown LSP servers
-	i.lsp.ShutdownAll()
+	// Preserve one diagnostic per language for the build boundary, then the
+	// phase failures, then any server that had to be killed.
+	i.diagnostics = append(i.lsp.Diagnostics(), i.phaseDiagnostics...)
+	for language := range groups {
+		executable := i.lsp.Executable(language)
+		if err := i.lsp.ShutdownLanguage(language); err != nil {
+			i.diagnostics = append(i.diagnostics, lsp.LSPDiagnostic{
+				Language:   language,
+				Executable: executable,
+				Category:   lsp.CleanupFailed,
+				Severity:   lsp.SeverityWarning,
+				Reason:     err.Error(),
+			})
+		}
+	}
 
 	fmt.Fprintf(i.progress, "✅ Indexed %d files, skipped %d unchanged, %d symbols, %d calls, %d type relations\n",
 		indexedFiles, skippedFiles, totalSymbols, totalCalls, totalHierarchy)
@@ -322,9 +411,9 @@ func (i *Indexer) storeSymbols(file FileInfo, symbols []lsp.DocumentSymbol, scop
 	return nil
 }
 
-// Close shuts down all LSP servers
-func (i *Indexer) Close() {
-	i.lsp.ShutdownAll()
+// Close shuts down all LSP servers and returns any cleanup failure.
+func (i *Indexer) Close() error {
+	return i.lsp.ShutdownAll()
 }
 
 // Helper functions

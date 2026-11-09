@@ -24,6 +24,8 @@ type HierarchyIndexer struct {
 	db       *db.Manager
 	lsp      *lsp.Manager
 	rootPath string
+	// failures counts failed requests of the latest IndexHierarchyLSP call.
+	failures requestFailures
 }
 
 // NewHierarchyIndexer creates a new hierarchy indexer
@@ -37,6 +39,7 @@ func NewHierarchyIndexer(dbManager *db.Manager, lspManager *lsp.Manager, rootPat
 
 // IndexHierarchyLSP extracts type hierarchy using LSP typeHierarchy requests
 func (h *HierarchyIndexer) IndexHierarchyLSP(ctx context.Context, language string) (int, error) {
+	h.failures = requestFailures{}
 	client, err := h.lsp.GetClient(ctx, language)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get LSP client: %w", err)
@@ -66,6 +69,7 @@ func (h *HierarchyIndexer) IndexHierarchyLSP(ctx context.Context, language strin
 				continue
 			}
 			if err := client.DidOpenTextDocument(fileURI, language, string(content)); err != nil {
+				h.failures.add(client, err)
 				continue
 			}
 			openedFiles[fileURI] = true
@@ -79,14 +83,25 @@ func (h *HierarchyIndexer) IndexHierarchyLSP(ctx context.Context, language strin
 
 		// Prepare type hierarchy at this position
 		items, err := client.PrepareTypeHierarchy(ctx, fileURI, pos)
-		if err != nil || len(items) == 0 {
-			// Not all LSPs support type hierarchy, continue
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return count, ctxErr
+			}
+			// Not all LSPs support type hierarchy; add ignores unsupported.
+			h.failures.add(client, err)
+			continue
+		}
+		if len(items) == 0 {
 			continue
 		}
 
 		// Get supertypes for the first item
 		supertypes, err := client.Supertypes(ctx, items[0])
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return count, ctxErr
+			}
+			h.failures.add(client, err)
 			continue
 		}
 

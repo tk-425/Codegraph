@@ -16,6 +16,8 @@ type CallGraphIndexer struct {
 	db       *db.Manager
 	mgr      *lsp.Manager
 	rootPath string
+	// failures counts failed requests of the latest IndexCallGraph call.
+	failures requestFailures
 }
 
 // NewCallGraphIndexer creates a new call graph indexer
@@ -30,6 +32,7 @@ func NewCallGraphIndexer(dbManager *db.Manager, lspManager *lsp.Manager, rootPat
 // IndexCallGraph extracts call relationships using textDocument/references
 // For each function symbol, we find all references to it - these are potential call sites
 func (c *CallGraphIndexer) IndexCallGraph(ctx context.Context, language string) (int, error) {
+	c.failures = requestFailures{}
 	// Get LSP client for this language
 	client, err := c.mgr.GetClient(ctx, language)
 	if err != nil {
@@ -60,6 +63,7 @@ func (c *CallGraphIndexer) IndexCallGraph(ctx context.Context, language string) 
 				continue
 			}
 			if err := client.DidOpenTextDocument(fileURI, language, content); err != nil {
+				c.failures.add(client, err)
 				continue
 			}
 			openedFiles[fileURI] = true
@@ -74,6 +78,10 @@ func (c *CallGraphIndexer) IndexCallGraph(ctx context.Context, language string) 
 		// Find all references to this function (excluding declaration)
 		refs, err := client.References(ctx, fileURI, pos, false)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return callCount, ctxErr
+			}
+			c.failures.add(client, err)
 			continue
 		}
 
