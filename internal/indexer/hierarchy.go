@@ -58,6 +58,8 @@ func (h *HierarchyIndexer) IndexHierarchyLSP(ctx context.Context, language strin
 
 	count := 0
 	openedFiles := make(map[string]bool)
+	lines := lsp.NewSourceLines()
+	enc := client.PositionEncoding()
 
 	for _, sym := range symbols {
 		fileURI := lsp.PathToURI(sym.File)
@@ -76,10 +78,7 @@ func (h *HierarchyIndexer) IndexHierarchyLSP(ctx context.Context, language strin
 		}
 
 		// Get supertypes for this symbol
-		pos := lsp.Position{
-			Line:      sym.Line - 1,
-			Character: sym.Column,
-		}
+		pos := lines.ToLSP(enc, sym.File, sym.Line, sym.Column)
 
 		// Prepare type hierarchy at this position
 		items, err := client.PrepareTypeHierarchy(ctx, fileURI, pos)

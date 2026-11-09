@@ -108,7 +108,11 @@ func serve(mode, fixture string) error {
 				return err
 			}
 			rootURI = params.RootURI
+			// A fixture may script the initialize result to vary capabilities.
 			result = json.RawMessage(`{"capabilities":{"documentSymbolProvider":true,"referencesProvider":true,"typeHierarchyProvider":true}}`)
+			if ok {
+				result = configured
+			}
 		} else if ok {
 			// Substitute inside encoded JSON, preserving escaping in the root URI.
 			encoded, _ := json.Marshal(rootURI)

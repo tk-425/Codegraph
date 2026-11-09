@@ -52,6 +52,8 @@ func (c *CallGraphIndexer) IndexCallGraph(ctx context.Context, language string) 
 	callCount := 0
 	openedFiles := make(map[string]bool)
 	root := lsp.NewRoot(c.rootPath)
+	lines := lsp.NewSourceLines()
+	enc := client.PositionEncoding()
 
 	for _, sym := range symbols {
 		fileURI := lsp.PathToURI(sym.File)
@@ -70,10 +72,7 @@ func (c *CallGraphIndexer) IndexCallGraph(ctx context.Context, language string) 
 		}
 
 		// Get position of the function name
-		pos := lsp.Position{
-			Line:      sym.Line - 1, // Convert to 0-indexed
-			Character: sym.Column,
-		}
+		pos := lines.ToLSP(enc, sym.File, sym.Line, sym.Column)
 
 		// Find all references to this function (excluding declaration)
 		refs, err := client.References(ctx, fileURI, pos, false)
@@ -92,13 +91,15 @@ func (c *CallGraphIndexer) IndexCallGraph(ctx context.Context, language string) 
 				continue
 			}
 			
+			refLine, refColumn := lines.FromLSP(enc, refPath, ref.Range.Start)
+
 			// Skip if same location as declaration
-			if refPath == sym.File && ref.Range.Start.Line+1 == sym.Line {
+			if refPath == sym.File && refLine == sym.Line {
 				continue
 			}
 
 			// Find which function contains this reference
-			callerID := c.findContainingFunction(refPath, ref.Range.Start.Line+1, language)
+			callerID := c.findContainingFunction(refPath, refLine, language)
 			if callerID == "" {
 				continue
 			}
@@ -108,8 +109,8 @@ func (c *CallGraphIndexer) IndexCallGraph(ctx context.Context, language string) 
 				CallerID: callerID,
 				CalleeID: sym.ID,
 				File:     refPath,
-				Line:     ref.Range.Start.Line + 1,
-				Column:   ref.Range.Start.Character,
+				Line:     refLine,
+				Column:   refColumn,
 			}
 
 			if err := c.db.InsertCall(dbCall); err != nil {

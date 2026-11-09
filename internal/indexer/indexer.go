@@ -350,10 +350,13 @@ func (i *Indexer) indexFile(ctx context.Context, client *lsp.Client, file FileIn
 	}
 
 	// Store symbols in database
-	count := 0
-	if err := i.storeSymbols(file, symbols, nil, idAllocator{}, &count); err != nil {
+	lines := lsp.NewSourceLines()
+	lines.Set(file.Path, contentStr)
+	doc := &lspDocument{file: file, enc: client.PositionEncoding(), lines: lines, ids: idAllocator{}}
+	if err := i.storeSymbols(doc, symbols, nil); err != nil {
 		return 0, err
 	}
+	count := doc.count
 
 	// Update file metadata
 	if err := i.db.UpdateFileMeta(file.Path, time.Now(), file.Language); err != nil {
@@ -363,8 +366,18 @@ func (i *Indexer) indexFile(ctx context.Context, client *lsp.Client, file FileIn
 	return count, nil
 }
 
+// lspDocument is one file's document symbols being stored.
+type lspDocument struct {
+	file  FileInfo
+	enc   lsp.PositionEncoding
+	lines *lsp.SourceLines
+	ids   idAllocator
+	count int
+}
+
 // storeSymbols recursively stores symbols in the database
-func (i *Indexer) storeSymbols(file FileInfo, symbols []lsp.DocumentSymbol, owners []string, ids idAllocator, count *int) error {
+func (i *Indexer) storeSymbols(doc *lspDocument, symbols []lsp.DocumentSymbol, owners []string) error {
+	file := doc.file
 	for _, sym := range symbols {
 		key := symbolKey{Language: file.Language, RelPath: file.RelPath, Owners: owners, Name: sym.Name}
 		if file.Language == "go" {
@@ -373,17 +386,19 @@ func (i *Indexer) storeSymbols(file FileInfo, symbols []lsp.DocumentSymbol, owne
 				key.Name = method
 			}
 		}
+		line, column := doc.lines.FromLSP(doc.enc, file.Path, sym.SelectionRange.Start)
+		endLine, endColumn := doc.lines.FromLSP(doc.enc, file.Path, sym.Range.End)
 
 		// Create database symbol
 		dbSym := &db.Symbol{
-			ID:            ids.assign(key),
+			ID:            doc.ids.assign(key),
 			Name:          key.Name,
 			Kind:          lsp.SymbolKindToString(sym.Kind),
 			File:          file.Path,
-			Line:          sym.SelectionRange.Start.Line + 1, // LSP is 0-indexed
-			Column:        sym.SelectionRange.Start.Character,
-			EndLine:       intPtr(sym.Range.End.Line + 1),
-			EndColumn:     intPtr(sym.Range.End.Character),
+			Line:          line,
+			Column:        column,
+			EndLine:       intPtr(endLine),
+			EndColumn:     intPtr(endColumn),
 			Scope:         key.Scope(),
 			Signature:     extractReturnType(sym.Detail, file.Language),
 			Documentation: "",
@@ -395,12 +410,12 @@ func (i *Indexer) storeSymbols(file FileInfo, symbols []lsp.DocumentSymbol, owne
 		if err := i.db.InsertSymbol(dbSym); err != nil {
 			return err
 		}
-		*count++
+		doc.count++
 
 		// Recursively process children
 		if len(sym.Children) > 0 {
 			childOwners := append(append([]string(nil), key.Owners...), key.Name)
-			if err := i.storeSymbols(file, sym.Children, childOwners, ids, count); err != nil {
+			if err := i.storeSymbols(doc, sym.Children, childOwners); err != nil {
 				return err
 			}
 		}

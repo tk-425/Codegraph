@@ -1,0 +1,11 @@
+{
+  "initialize": {"capabilities": {"documentSymbolProvider": true, "positionEncoding": "utf-8"}},
+  "textDocument/documentSymbol": [
+    {
+      "name": "Target",
+      "kind": 12,
+      "range": {"start": {"line": 2, "character": 9}, "end": {"line": 2, "character": 25}},
+      "selectionRange": {"start": {"line": 2, "character": 14}, "end": {"line": 2, "character": 20}}
+    }
+  ]
+}

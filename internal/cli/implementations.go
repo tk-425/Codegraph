@@ -89,6 +89,7 @@ func runImplementations(cmd *cobra.Command, args []string) error {
 
 	// Create LSP manager
 	root := lsp.NewRoot(cwd)
+	lines := lsp.NewSourceLines()
 	lspManager := lsp.NewManager(cfg, root.URI())
 	defer shutdownLiveLSP(cmd, lspManager)
 
@@ -109,10 +110,7 @@ func runImplementations(cmd *cobra.Command, args []string) error {
 
 		// Get implementations via LSP
 		fileURI := lsp.PathToURI(sym.File)
-		pos := lsp.Position{
-			Line:      sym.Line - 1,
-			Character: sym.Column,
-		}
+		pos := lines.ToLSP(client.PositionEncoding(), sym.File, sym.Line, sym.Column)
 
 		implementations, err := client.Implementation(ctx, fileURI, pos)
 		if err != nil {
@@ -199,6 +197,7 @@ func runImplementationsJSON(cmd *cobra.Command, interfaceName string) error {
 	}
 
 	root := lsp.NewRoot(cwd)
+	lines := lsp.NewSourceLines()
 	lspManager := lsp.NewManager(cfg, root.URI())
 	defer shutdownLiveLSP(cmd, lspManager)
 
@@ -212,7 +211,7 @@ func runImplementationsJSON(cmd *cobra.Command, interfaceName string) error {
 			continue
 		}
 		fileURI := lsp.PathToURI(sym.File)
-		pos := lsp.Position{Line: sym.Line - 1, Character: sym.Column}
+		pos := lines.ToLSP(client.PositionEncoding(), sym.File, sym.Line, sym.Column)
 		impls, ierr := client.Implementation(ctx, fileURI, pos)
 		if ierr != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
