@@ -90,9 +90,10 @@ func serve(mode, fixture string) error {
 		if err := json.Unmarshal(message.Params, &params); err != nil && len(message.Params) > 0 {
 			return err
 		}
-		if message.Method == "textDocument/references" || message.Method == "textDocument/prepareTypeHierarchy" {
+		switch message.Method {
+		case "textDocument/references", "textDocument/prepareTypeHierarchy", "textDocument/prepareCallHierarchy":
 			key = fmt.Sprintf("%s@%d", message.Method, params.Position.Line)
-		} else if message.Method == "typeHierarchy/supertypes" {
+		case "typeHierarchy/supertypes", "callHierarchy/incomingCalls":
 			key += "@" + params.Item.Name
 		}
 		configured, ok := results[key]

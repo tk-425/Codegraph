@@ -74,3 +74,50 @@ func TestUncheckableReferencesAreRecordedNotStored(t *testing.T) {
 		t.Errorf("unvalidated site not recorded: %+v", sites)
 	}
 }
+
+// lspGraph indexes one file entirely from a scripted server, then reruns the
+// server call pass alone and returns how many calls it stored.
+func lspGraph(t *testing.T, fixture, name, language, responses string) (*db.Manager, int) {
+	t.Helper()
+	p := newTransportProject(t, fixture, name)
+	useScriptedServer(t, p.cfg, language, responses)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := p.index(ctx, t); err != nil {
+		t.Fatal(err)
+	}
+	manager := lsp.NewManager(p.cfg, lsp.NewRoot(p.root).URI())
+	t.Cleanup(func() { _ = manager.ShutdownAll() })
+	count, err := NewCallGraphIndexer(p.database, manager, p.root).IndexCallGraph(ctx, language)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p.database, count
+}
+
+// T18: one site dispatching to an interface method and its implementation
+// keeps both targets.
+func TestCallHierarchyKeepsDistinctTargetsAtOneSite(t *testing.T) {
+	database, count := lspGraph(t, "calls/dispatch.go", "dispatch.go", "go", "callhierarchy.json")
+	if count != 2 {
+		t.Fatalf("T18: stored %d calls from the one site, want 2 (interface + implementation)", count)
+	}
+	runs := symbolsNamed(t, database, "Run")
+	if len(runs) != 2 || runs[0].ID == runs[1].ID {
+		t.Fatalf("want Runner.Run and Job.Run, got %+v", runs)
+	}
+	for _, run := range runs {
+		if run.Scope != "Runner" && run.Scope != "Job" {
+			t.Errorf("unexpected Run owner %q", run.Scope)
+		}
+	}
+}
+
+// SC13: without an advertised callHierarchyProvider the pass uses
+// references, never call hierarchy.
+func TestCallHierarchyIsUsedOnlyWhenAdvertised(t *testing.T) {
+	_, count := lspGraph(t, "calls/dispatch.go", "dispatch.go", "go", "callhierarchy-unadvertised.json")
+	if count != 0 {
+		t.Errorf("SC13: stored %d calls although call hierarchy was not advertised and references are empty", count)
+	}
+}

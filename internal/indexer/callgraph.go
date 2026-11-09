@@ -28,8 +28,12 @@ func NewCallGraphIndexer(dbManager *db.Manager, lspManager *lsp.Manager, rootPat
 }
 
 // IndexCallGraph extracts the calls to every indexed callable of language.
-// A reference is a call only when the syntax at that position is an
-// invocation; the caller is the innermost callable containing it.
+// It asks for incoming calls when the server advertises call hierarchy; the
+// client offers no dynamic registration, so the static capability is the
+// whole answer (LSP 3.17). Otherwise a reference is a call only when the
+// syntax at that position is an invocation. Either way the caller is an
+// indexed callable and each call site is kept, so distinct targets at one
+// site stay distinct.
 func (c *CallGraphIndexer) IndexCallGraph(ctx context.Context, language string) (int, error) {
 	c.failures = requestFailures{}
 	// Get LSP client for this language
@@ -65,6 +69,7 @@ func (c *CallGraphIndexer) IndexCallGraph(ctx context.Context, language string) 
 		}
 	}()
 
+	useHierarchy := lsp.Supports(client.Capabilities().CallHierarchyProvider)
 	callCount := 0
 	for _, sym := range symbols {
 		fileURI := lsp.PathToURI(sym.File)
@@ -83,6 +88,17 @@ func (c *CallGraphIndexer) IndexCallGraph(ctx context.Context, language string) 
 		}
 
 		pos := pass.lines.ToLSP(pass.enc, sym.File, sym.Line, sym.Column)
+		if useHierarchy {
+			stored, err := pass.incoming(ctx, client, fileURI, pos, sym)
+			callCount += stored
+			if err != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return callCount, ctxErr
+				}
+				c.failures.add(client, err)
+			}
+			continue
+		}
 		refs, err := client.References(ctx, fileURI, pos, false)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
@@ -183,4 +199,52 @@ func (p *callPass) reference(ctx context.Context, callee db.Symbol, path string,
 		Column:   column,
 	})
 	return err == nil, nil
+}
+
+// incoming stores the server's incoming calls to callee, one per call site.
+// It returns how many calls it stored.
+func (p *callPass) incoming(ctx context.Context, client *lsp.Client, uri string, pos lsp.Position, callee db.Symbol) (int, error) {
+	items, err := client.PrepareCallHierarchy(ctx, uri, pos)
+	if err != nil {
+		return 0, err
+	}
+	stored := 0
+	for _, item := range items {
+		calls, err := client.IncomingCalls(ctx, item)
+		if err != nil {
+			return stored, err
+		}
+		for _, in := range calls {
+			path, err := p.root.Path(in.From.URI)
+			if err != nil {
+				continue
+			}
+			symbols, err := p.fileSymbols(path)
+			if err != nil {
+				return stored, err
+			}
+			if len(symbols) == 0 {
+				continue // a caller outside the indexed project
+			}
+			line, column := p.lines.FromLSP(p.enc, path, in.From.SelectionRange.Start)
+			caller := symbols.named(line, column)
+			if caller == nil || !callableKinds[caller.Kind] {
+				caller = symbols.enclosing(line, column, callableKinds)
+			}
+			for _, r := range in.FromRanges {
+				siteLine, siteColumn := p.lines.FromLSP(p.enc, path, r.Start)
+				if caller == nil {
+					site := &db.Unresolved{Kind: "call", Language: p.language, TargetName: callee.Name, File: path, Line: siteLine, Column: siteColumn, Reason: reasonUnresolved}
+					if err := p.db.InsertUnresolved(site); err != nil {
+						return stored, err
+					}
+					continue
+				}
+				if err := p.db.InsertCall(&db.Call{CallerID: caller.ID, CalleeID: callee.ID, File: path, Line: siteLine, Column: siteColumn}); err == nil {
+					stored++
+				}
+			}
+		}
+	}
+	return stored, nil
 }
