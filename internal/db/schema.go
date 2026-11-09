@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS symbols (
     file TEXT NOT NULL,
     line INTEGER NOT NULL,
     column INTEGER NOT NULL,
+    start_line INTEGER NOT NULL DEFAULT 0,
+    start_column INTEGER NOT NULL DEFAULT 0,
     end_line INTEGER,
     end_column INTEGER,
     scope TEXT,

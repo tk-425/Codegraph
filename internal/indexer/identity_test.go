@@ -10,7 +10,7 @@ import (
 )
 
 // syntaxIndex indexes one source file with tree-sitter into a fresh database.
-func syntaxIndex(t *testing.T, name, language, source string) *db.Manager {
+func syntaxIndex(t *testing.T, name, language, source string) (*db.Manager, FileInfo) {
 	t.Helper()
 	root := t.TempDir()
 	database, err := db.NewManager(filepath.Join(root, "graph.db"))
@@ -32,7 +32,7 @@ func syntaxIndex(t *testing.T, name, language, source string) *db.Manager {
 	if _, err := NewTreeSitterIndexer(database, root).IndexFile(context.Background(), file); err != nil {
 		t.Fatal(err)
 	}
-	return database
+	return database, file
 }
 
 func symbolsNamed(t *testing.T, database *db.Manager, name string) []db.Symbol {
@@ -45,7 +45,7 @@ func symbolsNamed(t *testing.T, database *db.Manager, name string) []db.Symbol {
 }
 
 func TestOverloadsKeepDistinctIdentities(t *testing.T) {
-	database := syntaxIndex(t, "Calc.java", "java", `class Calc {
+	database, _ := syntaxIndex(t, "Calc.java", "java", `class Calc {
     int add(int a) { return a; }
     int add(String s) { return 0; }
 }
@@ -60,7 +60,7 @@ func TestOverloadsKeepDistinctIdentities(t *testing.T) {
 }
 
 func TestNestedScopesKeepTheFullOwnerChain(t *testing.T) {
-	database := syntaxIndex(t, "nested.py", "python", `class Outer:
+	database, _ := syntaxIndex(t, "nested.py", "python", `class Outer:
     class Inner:
         def run(self):
             pass

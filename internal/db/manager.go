@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -194,11 +195,11 @@ func (m *Manager) ClearTypeHierarchy(language string) error {
 // InsertSymbol inserts a symbol into the database
 func (m *Manager) InsertSymbol(s *Symbol) error {
 	_, err := m.db.Exec(`
-		INSERT OR REPLACE INTO symbols 
-		(id, name, kind, file, line, column, end_line, end_column, scope, signature, documentation, language, source, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		s.ID, s.Name, s.Kind, s.File, s.Line, s.Column, s.EndLine, s.EndColumn,
-		s.Scope, s.Signature, s.Documentation, s.Language, s.Source, s.CreatedAt,
+		INSERT OR REPLACE INTO symbols (`+symbolColumns("")+`)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		s.ID, s.Name, s.Kind, s.File, s.Line, s.Column, s.StartLine, s.StartColumn,
+		s.EndLine, s.EndColumn, s.Scope, s.Signature, s.Documentation, s.Language,
+		s.Source, s.CreatedAt,
 	)
 	return err
 }
@@ -226,8 +227,7 @@ func (m *Manager) InsertTypeHierarchy(th *TypeHierarchy) error {
 // GetImplementations returns symbols that implement/extend the given parent symbol
 func (m *Manager) GetImplementations(parentID string) ([]Symbol, error) {
 	query := `
-		SELECT s.id, s.name, s.kind, s.file, s.line, s.column, s.end_line, s.end_column, 
-			   s.scope, s.signature, s.documentation, s.language, s.source, s.created_at
+		SELECT ` + symbolColumns("s") + `
 		FROM symbols s
 		INNER JOIN type_hierarchy th ON s.id = th.child_id
 		WHERE th.parent_id = ?
@@ -245,8 +245,7 @@ func (m *Manager) GetImplementations(parentID string) ([]Symbol, error) {
 // GetImplementationsByName returns symbols that implement/extend a type by its name
 func (m *Manager) GetImplementationsByName(typeName string) ([]Symbol, error) {
 	query := `
-		SELECT s.id, s.name, s.kind, s.file, s.line, s.column, s.end_line, s.end_column, 
-			   s.scope, s.signature, s.documentation, s.language, s.source, s.created_at
+		SELECT ` + symbolColumns("s") + `
 		FROM symbols s
 		INNER JOIN type_hierarchy th ON s.id = th.child_id
 		INNER JOIN symbols parent ON th.parent_id = parent.id
@@ -264,7 +263,7 @@ func (m *Manager) GetImplementationsByName(typeName string) ([]Symbol, error) {
 
 // SearchSymbols searches for symbols by name with optional filters
 func (m *Manager) SearchSymbols(name string, kind string, languages []string) ([]Symbol, error) {
-	query := "SELECT id, name, kind, file, line, column, end_line, end_column, scope, signature, documentation, language, source, created_at FROM symbols WHERE name LIKE ?"
+	query := "SELECT " + symbolColumns("") + " FROM symbols WHERE name LIKE ?"
 	args := []interface{}{"%" + name + "%"}
 
 	if kind != "" {
@@ -300,8 +299,7 @@ func (m *Manager) GetCallers(symbolName string, languages []string) ([]CallerInf
 	// - Method with params: main(String[])
 	// - Qualified: Class.main(
 	query := `
-		SELECT s.id, s.name, s.kind, s.file, s.line, s.column, s.end_line, s.end_column, 
-		       s.scope, s.signature, s.documentation, s.language, s.source, s.created_at,
+		SELECT ` + symbolColumns("s") + `,
 		       c.file as call_file, c.line as call_line, c.column as call_column
 		FROM symbols s
 		JOIN calls c ON s.id = c.caller_id
@@ -332,18 +330,9 @@ func (m *Manager) GetCallers(symbolName string, languages []string) ([]CallerInf
 	var callers []CallerInfo
 	for rows.Next() {
 		var c CallerInfo
-		var endLine, endColumn *int
-		err := rows.Scan(
-			&c.ID, &c.Name, &c.Kind, &c.File, &c.Line, &c.Column,
-			&endLine, &endColumn, &c.Scope, &c.Signature, &c.Documentation,
-			&c.Language, &c.Source, &c.CreatedAt,
-			&c.CallFile, &c.CallLine, &c.CallColumn,
-		)
-		if err != nil {
+		if err := rows.Scan(append(c.Symbol.scanTargets(), &c.CallFile, &c.CallLine, &c.CallColumn)...); err != nil {
 			return nil, err
 		}
-		c.EndLine = endLine
-		c.EndColumn = endColumn
 		callers = append(callers, c)
 	}
 	return callers, rows.Err()
@@ -356,8 +345,7 @@ func (m *Manager) GetCallees(symbolName string, languages []string) ([]CalleeInf
 	// - Method with params: main(String[])
 	// - Qualified: Class.main
 	query := `
-		SELECT s.id, s.name, s.kind, s.file, s.line, s.column, s.end_line, s.end_column, 
-		       s.scope, s.signature, s.documentation, s.language, s.source, s.created_at,
+		SELECT ` + symbolColumns("s") + `,
 		       c.file as call_file, c.line as call_line, c.column as call_column
 		FROM symbols s
 		JOIN calls c ON s.id = c.callee_id
@@ -388,18 +376,9 @@ func (m *Manager) GetCallees(symbolName string, languages []string) ([]CalleeInf
 	var callees []CalleeInfo
 	for rows.Next() {
 		var c CalleeInfo
-		var endLine, endColumn *int
-		err := rows.Scan(
-			&c.ID, &c.Name, &c.Kind, &c.File, &c.Line, &c.Column,
-			&endLine, &endColumn, &c.Scope, &c.Signature, &c.Documentation,
-			&c.Language, &c.Source, &c.CreatedAt,
-			&c.CallFile, &c.CallLine, &c.CallColumn,
-		)
-		if err != nil {
+		if err := rows.Scan(append(c.Symbol.scanTargets(), &c.CallFile, &c.CallLine, &c.CallColumn)...); err != nil {
 			return nil, err
 		}
-		c.EndLine = endLine
-		c.EndColumn = endColumn
 		callees = append(callees, c)
 	}
 	return callees, rows.Err()
@@ -412,7 +391,7 @@ func (m *Manager) GetSignature(symbolName string, languages []string) ([]Symbol,
 	// - Method with params: main(String[])
 	// - Qualified: Class.main
 	query := `
-		SELECT id, name, kind, file, line, column, end_line, end_column, scope, signature, documentation, language, source, created_at
+		SELECT ` + symbolColumns("") + `
 		FROM symbols
 		WHERE (name = ? OR name LIKE ? OR name LIKE ?) AND signature IS NOT NULL AND signature != ''`
 	args := []interface{}{
@@ -440,7 +419,7 @@ func (m *Manager) GetSignature(symbolName string, languages []string) ([]Symbol,
 // GetFunctionSymbols returns all function symbols for a language
 func (m *Manager) GetFunctionSymbols(language string) ([]Symbol, error) {
 	query := `
-		SELECT id, name, kind, file, line, column, end_line, end_column, scope, signature, documentation, language, source, created_at
+		SELECT ` + symbolColumns("") + `
 		FROM symbols
 		WHERE kind IN ('function', 'method') AND language = ?
 		ORDER BY file, line`
@@ -457,7 +436,7 @@ func (m *Manager) GetFunctionSymbols(language string) ([]Symbol, error) {
 // GetTypeSymbols returns all class/interface/struct symbols for a language
 func (m *Manager) GetTypeSymbols(language string) ([]Symbol, error) {
 	query := `
-		SELECT id, name, kind, file, line, column, end_line, end_column, scope, signature, documentation, language, source, created_at
+		SELECT ` + symbolColumns("") + `
 		FROM symbols
 		WHERE kind IN ('class', 'interface', 'struct', 'type', 'enum') AND language = ?
 		ORDER BY file, line`
@@ -471,6 +450,16 @@ func (m *Manager) GetTypeSymbols(language string) ([]Symbol, error) {
 	return scanSymbols(rows)
 }
 
+// GetFileSymbols returns every symbol declared in file, in declaration order.
+func (m *Manager) GetFileSymbols(file string) ([]Symbol, error) {
+	rows, err := m.db.Query(`SELECT `+symbolColumns("")+` FROM symbols WHERE file = ? ORDER BY start_line, start_column`, file)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanSymbols(rows)
+}
+
 // GetSymbolByName returns symbol by name (flexible matching)
 func (m *Manager) GetSymbolByName(name string, languages []string) ([]Symbol, error) {
 	// Match symbol names flexibly:
@@ -478,7 +467,7 @@ func (m *Manager) GetSymbolByName(name string, languages []string) ([]Symbol, er
 	// - Method with params: main(String[])
 	// - Qualified: Class.main
 	query := `
-		SELECT id, name, kind, file, line, column, end_line, end_column, scope, signature, documentation, language, source, created_at
+		SELECT ` + symbolColumns("") + `
 		FROM symbols
 		WHERE (name = ? OR name LIKE ? OR name LIKE ?)`
 	args := []interface{}{
@@ -734,16 +723,29 @@ func (m *Manager) GetDetailedStats() (*DetailedStats, error) {
 
 // Helper functions
 
+// symbolColumns is the column list every symbol read and write uses, in the
+// order of Symbol.scanTargets; alias qualifies each column when non-empty.
+func symbolColumns(alias string) string {
+	columns := []string{"id", "name", "kind", "file", "line", "column", "start_line", "start_column",
+		"end_line", "end_column", "scope", "signature", "documentation", "language", "source", "created_at"}
+	if alias != "" {
+		for i, column := range columns {
+			columns[i] = alias + "." + column
+		}
+	}
+	return strings.Join(columns, ", ")
+}
+
+func (s *Symbol) scanTargets() []any {
+	return []any{&s.ID, &s.Name, &s.Kind, &s.File, &s.Line, &s.Column, &s.StartLine, &s.StartColumn,
+		&s.EndLine, &s.EndColumn, &s.Scope, &s.Signature, &s.Documentation, &s.Language, &s.Source, &s.CreatedAt}
+}
+
 func scanSymbols(rows *sql.Rows) ([]Symbol, error) {
 	var symbols []Symbol
 	for rows.Next() {
 		var s Symbol
-		err := rows.Scan(
-			&s.ID, &s.Name, &s.Kind, &s.File, &s.Line, &s.Column,
-			&s.EndLine, &s.EndColumn, &s.Scope, &s.Signature,
-			&s.Documentation, &s.Language, &s.Source, &s.CreatedAt,
-		)
-		if err != nil {
+		if err := rows.Scan(s.scanTargets()...); err != nil {
 			return nil, err
 		}
 		symbols = append(symbols, s)

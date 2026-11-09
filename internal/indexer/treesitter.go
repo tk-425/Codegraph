@@ -8,17 +8,6 @@ import (
 	"time"
 
 	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/c"
-	"github.com/smacker/go-tree-sitter/cpp"
-	"github.com/smacker/go-tree-sitter/csharp"
-	"github.com/smacker/go-tree-sitter/golang"
-	"github.com/smacker/go-tree-sitter/java"
-	"github.com/smacker/go-tree-sitter/ocaml"
-	"github.com/smacker/go-tree-sitter/python"
-	"github.com/smacker/go-tree-sitter/rust"
-	"github.com/smacker/go-tree-sitter/swift"
-	"github.com/smacker/go-tree-sitter/typescript/tsx"
-	"github.com/smacker/go-tree-sitter/typescript/typescript"
 	"github.com/tk-425/Codegraph/internal/db"
 )
 
@@ -39,7 +28,7 @@ func NewTreeSitterIndexer(dbManager *db.Manager, rootPath string) *TreeSitterInd
 // IndexFile extracts symbols from a file using tree-sitter
 func (t *TreeSitterIndexer) IndexFile(ctx context.Context, file FileInfo) (int, error) {
 	// Get the appropriate language
-	lang := t.getLanguage(file.Language)
+	lang := grammar(file.Language)
 	if lang == nil {
 		return 0, fmt.Errorf("tree-sitter does not support language: %s", file.Language)
 	}
@@ -76,38 +65,6 @@ func (t *TreeSitterIndexer) IndexFile(ctx context.Context, file FileInfo) (int, 
 	}
 
 	return len(symbols), nil
-}
-
-// getLanguage returns the tree-sitter language for a given language name
-func (t *TreeSitterIndexer) getLanguage(lang string) *sitter.Language {
-	switch lang {
-	case "go":
-		return golang.GetLanguage()
-	case "python":
-		return python.GetLanguage()
-	case "typescript":
-		return typescript.GetLanguage()
-	case "typescriptreact":
-		return tsx.GetLanguage()
-	case "javascript":
-		return typescript.GetLanguage()
-	case "java":
-		return java.GetLanguage()
-	case "swift":
-		return swift.GetLanguage()
-	case "rust":
-		return rust.GetLanguage()
-	case "ocaml":
-		return ocaml.GetLanguage()
-	case "c":
-		return c.GetLanguage()
-	case "cpp":
-		return cpp.GetLanguage()
-	case "csharp":
-		return csharp.GetLanguage()
-	default:
-		return nil
-	}
 }
 
 // extractSymbols walks the AST and extracts symbol definitions
@@ -173,26 +130,48 @@ func (t *TreeSitterIndexer) nodeToSymbol(node *sitter.Node, content []byte, file
 		}
 	}
 
-	startLine := int(node.StartPoint().Row) + 1
+	// The stored position is the name's; the declaration range is kept for
+	// containment.
+	startLine, startCol := nodePosition(node)
+	line, column := startLine, startCol
+	if nameNode := declarationName(node, name, content); nameNode != nil {
+		line, column = nodePosition(nameNode)
+	}
 	endLine := int(node.EndPoint().Row) + 1
-	startCol := int(node.StartPoint().Column)
 	endCol := int(node.EndPoint().Column)
 
 	return &db.Symbol{
-		ID:        key.ID(),
-		Name:      name,
-		Kind:      kind,
-		File:      file.Path,
-		Line:      startLine,
-		Column:    startCol,
-		EndLine:   &endLine,
-		EndColumn: &endCol,
-		Scope:     key.Scope(),
-		Signature: signature,
-		Language:  file.Language,
-		Source:    "tree-sitter",
-		CreatedAt: time.Now(),
+		ID:          key.ID(),
+		Name:        name,
+		Kind:        kind,
+		File:        file.Path,
+		Line:        line,
+		Column:      column,
+		StartLine:   startLine,
+		StartColumn: startCol,
+		EndLine:     &endLine,
+		EndColumn:   &endCol,
+		Scope:       key.Scope(),
+		Signature:   signature,
+		Language:    file.Language,
+		Source:      "tree-sitter",
+		CreatedAt:   time.Now(),
 	}, key
+}
+
+// declarationName finds the node spelling name in a declaration: its "name"
+// field, else the first leaf with that text.
+func declarationName(node *sitter.Node, name string, content []byte) *sitter.Node {
+	if nameNode := node.ChildByFieldName("name"); nameNode != nil && nameNode.Content(content) == name {
+		return nameNode
+	}
+	var found *sitter.Node
+	walk(node, func(n *sitter.Node) {
+		if found == nil && n.NamedChildCount() == 0 && n.Content(content) == name {
+			found = n
+		}
+	})
+	return found
 }
 
 // goMethodReceiver returns the receiver type name of a Go method declaration.
