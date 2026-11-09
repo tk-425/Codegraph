@@ -1,0 +1,44 @@
+name: verify
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-baseline:
+    runs-on: macos-latest
+    env:
+      CGO_ENABLED: "1"
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Compile
+        run: go build ./...
+      - name: Ordinary tests
+        run: go test ./...
+      - name: Characterization controls
+        run: go test -tags characterization -run '^TestCharacterizationControl' -count=1 -timeout=120s ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Format S0 files
+        # Existing formatting debt is recorded in the fix-spec, not auto-fixed here.
+        run: |
+          unformatted="$(gofmt -l \
+            cmd/codegraph/characterization_test.go \
+            internal/indexer/characterization_test.go \
+            internal/lsp/characterization_test.go \
+            internal/search/characterization_test.go \
+            testdata/characterization)"
+          if [ -n "$unformatted" ]; then
+            printf '%s\n' "$unformatted"
+            exit 1
+          fi
+      # Known-red checks are explicitly run during remediation. Do not hide
+      # failures with continue-on-error or call the controls acceptance coverage.

@@ -1,0 +1,12 @@
+{
+  "textDocument/references": [],
+  "textDocument/references@2": [
+    {
+      "uri": "${ROOT_URI}/references.go",
+      "range": {
+        "start": {"line": 5, "character": 5},
+        "end": {"line": 5, "character": 11}
+      }
+    }
+  ]
+}
