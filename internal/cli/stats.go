@@ -2,12 +2,9 @@ package cli
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/tk-425/Codegraph/internal/config"
 	"github.com/tk-425/Codegraph/internal/db"
 )
 
@@ -50,6 +47,7 @@ last build time, and database information.`,
 }
 
 func init() {
+	supportJSON(statsCmd)
 	rootCmd.AddCommand(statsCmd)
 	statsCmd.Flags().BoolVar(&statsCompact, "compact", false, "Compact output format")
 }
@@ -61,34 +59,9 @@ func runStats(cmd *cobra.Command, args []string) error {
 		return runStatsJSON(cmd)
 	}
 
-	// Get current directory
-	cwd, err := os.Getwd()
+	cwd, _, dbManager, _, err := openProject()
 	if err != nil {
-		return fmt.Errorf("failed to get current directory: %w", err)
-	}
-
-	// Check if codegraph is initialized
-	codegraphDir := filepath.Join(cwd, ".codegraph")
-	if _, err := os.Stat(codegraphDir); os.IsNotExist(err) {
-		return fmt.Errorf("not initialized. Run 'codegraph init' first")
-	}
-
-	// Load config
-	cfg, err := config.Load(cwd)
-	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
-	}
-
-	// Get database path
-	dbPath := cfg.GetDatabasePath(cwd)
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		return fmt.Errorf("database not found. Run 'codegraph build' first")
-	}
-
-	// Open database
-	dbManager, err := db.NewManager(dbPath)
-	if err != nil {
-		return fmt.Errorf("failed to open database: %w", err)
+		return err
 	}
 	defer dbManager.Close()
 
@@ -115,7 +88,7 @@ func runStatsJSON(cmd *cobra.Command) error {
 		return err
 	}
 
-	_, _, dbManager, code, err := openProject(true)
+	_, _, dbManager, code, err := openProject()
 	if err != nil {
 		return emitErr(code, err)
 	}

@@ -2,6 +2,7 @@ package lsp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -17,6 +18,9 @@ type Manager struct {
 	mu          sync.Mutex
 	clients     map[string]*Client // language -> client
 	diagnostics map[string]LSPDiagnostic
+	// unavailable caches a startup or transport failure for the rest of this
+	// manager's build attempt, so later phases do not restart the server.
+	unavailable map[string]error
 }
 
 const nativeTypeScriptMaxAttempts = 3
@@ -41,6 +45,7 @@ func NewManager(cfg *config.Config, rootURI string) *Manager {
 		rootURI:     rootURI,
 		clients:     make(map[string]*Client),
 		diagnostics: make(map[string]LSPDiagnostic),
+		unavailable: make(map[string]error),
 	}
 }
 
@@ -49,8 +54,17 @@ func (m *Manager) GetClient(ctx context.Context, language string) (*Client, erro
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Return existing client if available
+	if err, ok := m.unavailable[language]; ok {
+		return nil, err
+	}
 	if client, ok := m.clients[language]; ok {
+		if err := client.Err(); err != nil {
+			// A server whose transport failed is not restarted this attempt.
+			delete(m.clients, language)
+			_ = client.Close()
+			m.unavailable[language] = err
+			return nil, err
+		}
 		return client, nil
 	}
 
@@ -60,6 +74,7 @@ func (m *Manager) GetClient(ctx context.Context, language string) (*Client, erro
 	if !ok {
 		err := fmt.Errorf("no LSP configuration for language: %s", language)
 		m.diagnostics[language] = newDiagnostic(language, "", projectRootFromURI(m.rootURI), err, false)
+		m.unavailable[language] = err
 		return nil, err
 	}
 	server := typeScriptServer{command: lspConfig.Command, args: lspConfig.Args}
@@ -67,6 +82,7 @@ func (m *Manager) GetClient(ctx context.Context, language string) (*Client, erro
 		resolved, resolveErr := resolveTypeScriptServer(m.cfg, projectRootFromURI(m.rootURI), language)
 		if resolveErr != nil {
 			m.diagnostics[language] = newDiagnostic(language, server.command, projectRootFromURI(m.rootURI), resolveErr, m.cfg.IsExplicitLSPOverride(language))
+			m.unavailable[language] = resolveErr
 			return nil, resolveErr
 		}
 		server = resolved
@@ -80,6 +96,9 @@ func (m *Manager) GetClient(ctx context.Context, language string) (*Client, erro
 	for attempt := 1; attempt <= attempts; attempt++ {
 		client, err := newLSPClient(server.command, server.args, m.rootURI, language)
 		if err == nil {
+			client.requestTimeout = m.cfg.LSPTimeouts.Request()
+			client.gracefulTimeout = m.cfg.LSPTimeouts.ShutdownGraceful()
+			client.forceTimeout = m.cfg.LSPTimeouts.ShutdownForce()
 			initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			err = initializeLSP(initCtx, client)
 			cancel()
@@ -100,7 +119,9 @@ func (m *Manager) GetClient(ctx context.Context, language string) (*Client, erro
 
 	diagnostic := newDiagnostic(language, server.command, projectRootFromURI(m.rootURI), lastErr, m.cfg.IsExplicitLSPOverride(language))
 	m.diagnostics[language] = diagnostic
-	return nil, fmt.Errorf("failed to initialize LSP for %s: %w", language, lastErr)
+	err := fmt.Errorf("failed to initialize LSP for %s: %w", language, lastErr)
+	m.unavailable[language] = err
+	return nil, err
 }
 
 // Diagnostics returns one startup-failure diagnostic per affected language,
@@ -122,49 +143,52 @@ func (m *Manager) Diagnostics() []LSPDiagnostic {
 	return out
 }
 
-// ShutdownAll shuts down all LSP servers
+// cleanupFailedClient terminates a client whose initialization failed.
 func cleanupFailedClient(client *Client) {
 	if client.initialized {
 		_ = shutdownLSP(context.Background(), client)
 		return
 	}
-	if client.stdin != nil {
-		_ = client.stdin.Close()
-	}
-	if client.stdout != nil {
-		_ = client.stdout.Close()
-	}
-	if client.cmd != nil {
-		_ = client.cmd.Wait()
-	}
+	_ = client.Close()
 }
 
-func (m *Manager) ShutdownAll() {
+// ShutdownAll shuts down every LSP server, each within its own cleanup budget,
+// and returns the joined cleanup failures.
+func (m *Manager) ShutdownAll() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	for lang, client := range m.clients {
-		if err := client.Shutdown(ctx); err != nil {
-			fmt.Printf("Warning: failed to shutdown %s LSP: %v\n", lang, err)
+	var errs []error
+	for _, client := range m.clients {
+		if err := shutdownLSP(context.Background(), client); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	m.clients = make(map[string]*Client)
+	return errors.Join(errs...)
 }
 
 // ShutdownLanguage shuts down a specific language server
-func (m *Manager) ShutdownLanguage(language string) {
+func (m *Manager) ShutdownLanguage(language string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if client, ok := m.clients[language]; ok {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		client.Shutdown(ctx)
-		delete(m.clients, language)
+	client, ok := m.clients[language]
+	if !ok {
+		return nil
 	}
+	delete(m.clients, language)
+	return shutdownLSP(context.Background(), client)
+}
+
+// Executable returns the command of the running server for language, or "".
+func (m *Manager) Executable(language string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if client, ok := m.clients[language]; ok {
+		return client.Executable()
+	}
+	return ""
 }
 
 // ActiveLanguages returns list of active LSP languages

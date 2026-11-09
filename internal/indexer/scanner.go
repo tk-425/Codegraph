@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,11 +37,14 @@ func NewScanner(rootPath string, ignorePath string) (*Scanner, error) {
 }
 
 // Scan discovers all source files in the project
-func (s *Scanner) Scan() ([]FileInfo, error) {
+func (s *Scanner) Scan(ctx context.Context) ([]FileInfo, error) {
 	var files []FileInfo
 
 	err := filepath.Walk(s.rootPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 

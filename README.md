@@ -110,8 +110,26 @@ Persistent flags, available on every command:
 
 | Flag           | Description                                                                                      |
 | :------------- | :----------------------------------------------------------------------------------------------- |
-| `--json`       | Emit machine-readable JSON output (read-only query commands only).                                |
+| `--json`       | Emit exactly one JSON envelope on stdout. Supported by `search`, `signature`, `callers`, `callees`, `implementations`, `types`, `health`, `stats`, `projects` and `build`. |
 | `--lsp-stderr` | Forward raw language-server standard error instead of discarding it. Also set by `CODEGRAPH_LSP_STDERR`. |
+
+### JSON output
+
+Every `--json` invocation writes one envelope with the keys `command`, `query`, `count`, `results` and `errors`; warnings and progress go to stderr. A failure exits nonzero with one entry in `errors`, including argument and flag validation. `init`, `prune` and help have no JSON form and report `json_unsupported`. Query commands open the database read-only and report `database_missing` rather than creating one. `health` reports degraded state as `ok: false` records and exits 0.
+
+Error codes added for the output boundary: `invalid_arguments`, `json_unsupported`, `cancelled` (interrupt or `SIGTERM`), `scan_failed`, `database_init_failed`, `index_failed`, and `command_failed` for an otherwise unclassified failure. `build` results may include `request_failed` (LSP requests that failed within a phase while the build fell back) and `cleanup_failed` (a server that had to be killed) diagnostic records.
+
+### LSP time budgets
+
+```toml
+# .codegraph/config.toml
+[lsp_timeouts]
+request_seconds = 30           # each ordinary LSP request
+shutdown_graceful_seconds = 5  # shutdown/exit before the server is killed
+shutdown_force_seconds = 5     # waiting for a killed server to be reaped
+```
+
+Values must be positive. Server initialization keeps its own 30-second budget per attempt. These are safety bounds, not performance guarantees.
 
 ## 🤖 AI Agent Integration
 

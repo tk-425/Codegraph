@@ -22,6 +22,7 @@ var healthCmd = &cobra.Command{
 }
 
 func init() {
+	supportJSON(healthCmd)
 	rootCmd.AddCommand(healthCmd)
 }
 
@@ -70,7 +71,7 @@ func runHealth(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	dbManager, err := db.NewManager(dbPath)
+	dbManager, err := db.OpenReadOnly(dbPath)
 	if err != nil {
 		fmt.Printf("❌ %s: %v\n", Error("Database error"), err)
 		return nil
@@ -141,7 +142,7 @@ func runHealthJSON(cmd *cobra.Command) error {
 		return EmitJSON(out, "health", nil, records, nil)
 	}
 
-	dbManager, err := db.NewManager(dbPath)
+	dbManager, err := db.OpenReadOnly(dbPath)
 	if err != nil {
 		records = append(records, healthRecord{Category: "database", Name: "database", OK: false, Detail: err.Error()})
 		return EmitJSON(out, "health", nil, records, nil)

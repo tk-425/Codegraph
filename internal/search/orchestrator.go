@@ -2,6 +2,7 @@ package search
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
@@ -44,13 +45,24 @@ func NewOrchestrator(tiers ...Tier) *Orchestrator {
 	return &Orchestrator{tiers: tiers}
 }
 
-// Search executes search across all tiers until results are found
-func (o *Orchestrator) Search(ctx context.Context, opts SearchOptions) ([]SearchResult, error) {
+// TierFailure records a tier that could not answer a search.
+type TierFailure struct {
+	Tier string
+	Err  error
+}
+
+// Search executes search across all tiers until results are found. Tier
+// failures are returned rather than printed; when no tier produced results
+// and any tier failed, the empty result is not reported as a success.
+func (o *Orchestrator) Search(ctx context.Context, opts SearchOptions) ([]SearchResult, []TierFailure, error) {
+	var failures []TierFailure
 	for _, tier := range o.tiers {
+		if err := ctx.Err(); err != nil {
+			return nil, failures, err
+		}
 		results, err := tier.Search(ctx, opts)
 		if err != nil {
-			// Log error but continue to next tier
-			fmt.Printf("   ⚠️  %s tier error: %v\n", tier.Name(), err)
+			failures = append(failures, TierFailure{Tier: tier.Name(), Err: err})
 			continue
 		}
 
@@ -59,11 +71,18 @@ func (o *Orchestrator) Search(ctx context.Context, opts SearchOptions) ([]Search
 			if opts.Limit > 0 && len(results) > opts.Limit {
 				results = results[:opts.Limit]
 			}
-			return results, nil
+			return results, failures, nil
 		}
 	}
 
-	return []SearchResult{}, nil
+	if len(failures) > 0 {
+		errs := make([]error, 0, len(failures))
+		for _, failure := range failures {
+			errs = append(errs, fmt.Errorf("%s tier: %w", failure.Tier, failure.Err))
+		}
+		return nil, failures, errors.Join(errs...)
+	}
+	return []SearchResult{}, nil, nil
 }
 
 // SearchAll executes search across all tiers and merges results

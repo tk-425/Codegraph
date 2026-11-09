@@ -1,15 +1,11 @@
 package cli
 
 import (
-	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/tk-425/Codegraph/internal/config"
-	"github.com/tk-425/Codegraph/internal/db"
 	"github.com/tk-425/Codegraph/internal/lsp"
 )
 
@@ -29,6 +25,7 @@ Examples:
 
 func init() {
 	implementationsCmd.Flags().StringVar(&implementationsLangFlag, "lang", "", "Filter by language(s), comma-separated")
+	supportJSON(implementationsCmd)
 	rootCmd.AddCommand(implementationsCmd)
 }
 
@@ -47,35 +44,18 @@ func runImplementations(cmd *cobra.Command, args []string) error {
 		return runImplementationsJSON(cmd, interfaceName)
 	}
 
-	// Get current directory
-	cwd, err := os.Getwd()
+	cwd, cfg, dbManager, _, err := openProject()
 	if err != nil {
-		return fmt.Errorf("failed to get current directory: %w", err)
-	}
-
-	// Check if codegraph is initialized
-	codegraphDir := filepath.Join(cwd, ".codegraph")
-	if _, err := os.Stat(codegraphDir); os.IsNotExist(err) {
-		return fmt.Errorf("codegraph not initialized. Run 'codegraph init' first")
-	}
-
-	// Load config
-	cfg, err := config.Load(cwd)
-	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
-	}
-
-	// Open database
-	dbPath := cfg.GetDatabasePath(cwd)
-	dbManager, err := db.NewManager(dbPath)
-	if err != nil {
-		return fmt.Errorf("failed to open database: %w", err)
+		return err
 	}
 	defer dbManager.Close()
 
 	// First, try to find implementations in the database (from type_hierarchy table)
 	dbImplementations, err := dbManager.GetImplementationsByName(interfaceName)
-	if err == nil && len(dbImplementations) > 0 {
+	if err != nil {
+		return fmt.Errorf("failed to find implementations: %w", err)
+	}
+	if len(dbImplementations) > 0 {
 		fmt.Printf("🔧 Implementations of %s (%s found):\n\n", Symbol(interfaceName), Info(len(dbImplementations)))
 		for _, impl := range dbImplementations {
 			relPath, _ := filepath.Rel(cwd, impl.File)
@@ -110,9 +90,9 @@ func runImplementations(cmd *cobra.Command, args []string) error {
 	// Create LSP manager
 	rootURI := "file://" + cwd
 	lspManager := lsp.NewManager(cfg, rootURI)
-	defer lspManager.ShutdownAll()
+	defer shutdownLiveLSP(cmd, lspManager)
 
-	ctx := context.Background()
+	ctx := commandContext(cmd)
 	found := false
 
 	for _, sym := range symbols {
@@ -136,6 +116,10 @@ func runImplementations(cmd *cobra.Command, args []string) error {
 
 		implementations, err := client.Implementation(ctx, fileURI, pos)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			warnLiveLSP(cmd, sym.Language, err)
 			continue
 		}
 
@@ -168,7 +152,7 @@ func runImplementationsJSON(cmd *cobra.Command, interfaceName string) error {
 		return err
 	}
 
-	cwd, cfg, dbManager, code, err := openProject(false)
+	cwd, cfg, dbManager, code, err := openProject()
 	if err != nil {
 		return emitErr(code, err)
 	}
@@ -177,19 +161,20 @@ func runImplementationsJSON(cmd *cobra.Command, interfaceName string) error {
 	records := make([]implementationRecord, 0)
 
 	dbImpls, err := dbManager.GetImplementationsByName(interfaceName)
-	if err == nil {
-		for _, impl := range dbImpls {
-			relPath, rerr := filepath.Rel(cwd, impl.File)
-			if rerr != nil {
-				relPath = impl.File
-			}
-			records = append(records, implementationRecord{
-				Name: impl.Name,
-				Kind: impl.Kind,
-				File: relPath,
-				Line: impl.Line,
-			})
+	if err != nil {
+		return emitErr("implementations_lookup_failed", fmt.Errorf("failed to find implementations: %w", err))
+	}
+	for _, impl := range dbImpls {
+		relPath, rerr := filepath.Rel(cwd, impl.File)
+		if rerr != nil {
+			relPath = impl.File
 		}
+		records = append(records, implementationRecord{
+			Name: impl.Name,
+			Kind: impl.Kind,
+			File: relPath,
+			Line: impl.Line,
+		})
 	}
 
 	if len(records) > 0 {
@@ -212,9 +197,9 @@ func runImplementationsJSON(cmd *cobra.Command, interfaceName string) error {
 
 	rootURI := "file://" + cwd
 	lspManager := lsp.NewManager(cfg, rootURI)
-	defer lspManager.ShutdownAll()
+	defer shutdownLiveLSP(cmd, lspManager)
 
-	ctx := context.Background()
+	ctx := commandContext(cmd)
 	for _, sym := range symbols {
 		if sym.Kind != "interface" && sym.Kind != "class" && sym.Kind != "struct" {
 			continue
@@ -227,6 +212,10 @@ func runImplementationsJSON(cmd *cobra.Command, interfaceName string) error {
 		pos := lsp.Position{Line: sym.Line - 1, Character: sym.Column}
 		impls, ierr := client.Implementation(ctx, fileURI, pos)
 		if ierr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return emitErr("cancelled", ctxErr)
+			}
+			warnLiveLSP(cmd, sym.Language, ierr)
 			continue
 		}
 		for _, impl := range impls {
@@ -245,4 +234,16 @@ func runImplementationsJSON(cmd *cobra.Command, interfaceName string) error {
 	}
 
 	return EmitJSON(out, "implementations", &interfaceName, records, nil)
+}
+
+// warnLiveLSP reports a failed live lookup on stderr; stdout stays reserved
+// for the command's own output.
+func warnLiveLSP(cmd *cobra.Command, language string, err error) {
+	fmt.Fprintf(cmd.ErrOrStderr(), "warning: live %s implementation lookup failed: %v\n", language, err)
+}
+
+func shutdownLiveLSP(cmd *cobra.Command, manager *lsp.Manager) {
+	if err := manager.ShutdownAll(); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: LSP cleanup: %v\n", err)
+	}
 }

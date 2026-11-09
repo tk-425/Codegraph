@@ -3,6 +3,7 @@ package lsp
 import (
 	"context"
 	"errors"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -184,3 +185,65 @@ func TestManagerDiagnosticsMergesStartupFailuresAndServerLogs(t *testing.T) {
 		t.Errorf("second call returned %d records, want only the startup failure after the drain", len(second))
 	}
 }
+
+func TestManagerCachesStartupFailureForTheAttempt(t *testing.T) {
+	calls := 0
+	oldNew := newLSPClient
+	defer func() { newLSPClient = oldNew }()
+	newLSPClient = func(string, []string, string, string) (*Client, error) {
+		calls++
+		return nil, errors.New("exec: not found")
+	}
+
+	manager := NewManager(config.DefaultConfig(), "file:///project")
+	for phase := 0; phase < 3; phase++ {
+		if _, err := manager.GetClient(context.Background(), "go"); err == nil {
+			t.Fatal("unavailable server reported success")
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("server start attempts = %d across three phases, want one per build attempt", calls)
+	}
+	if records := manager.Diagnostics(); len(records) != 1 {
+		t.Fatalf("diagnostics = %+v, want one startup record", records)
+	}
+}
+
+func TestManagerDoesNotReturnClientWithClosedTransport(t *testing.T) {
+	oldNew, oldInit := newLSPClient, initializeLSP
+	defer func() { newLSPClient, initializeLSP = oldNew, oldInit }()
+	dead := newClient(nopWriteCloser{}, nopReadCloser{}, "", "go")
+	newLSPClient = func(string, []string, string, string) (*Client, error) { return dead, nil }
+	initializeLSP = func(context.Context, *Client) error { return nil }
+
+	manager := NewManager(config.DefaultConfig(), "file:///project")
+	if _, err := manager.GetClient(context.Background(), "go"); err != nil {
+		t.Fatal(err)
+	}
+	dead.fail(errors.New("server exited"))
+	if _, err := manager.GetClient(context.Background(), "go"); !errors.Is(err, ErrTransportClosed) {
+		t.Fatalf("err = %v, want the closed transport reported instead of a dead client", err)
+	}
+}
+
+func TestManagerAppliesConfiguredBudgets(t *testing.T) {
+	oldNew, oldInit := newLSPClient, initializeLSP
+	defer func() { newLSPClient, initializeLSP = oldNew, oldInit }()
+	created := newClient(nopWriteCloser{}, nopReadCloser{}, "", "go")
+	newLSPClient = func(string, []string, string, string) (*Client, error) { return created, nil }
+	initializeLSP = func(context.Context, *Client) error { return nil }
+
+	cfg := config.DefaultConfig()
+	cfg.LSPTimeouts = config.LSPTimeoutsConfig{RequestSeconds: 7, ShutdownGracefulSeconds: 2, ShutdownForceSeconds: 3}
+	if _, err := NewManager(cfg, "file:///project").GetClient(context.Background(), "go"); err != nil {
+		t.Fatal(err)
+	}
+	if created.requestTimeout != 7*time.Second || created.gracefulTimeout != 2*time.Second || created.forceTimeout != 3*time.Second {
+		t.Fatalf("budgets = %s/%s/%s, want 7s/2s/3s from config", created.requestTimeout, created.gracefulTimeout, created.forceTimeout)
+	}
+}
+
+type nopReadCloser struct{}
+
+func (nopReadCloser) Read([]byte) (int, error) { return 0, io.EOF }
+func (nopReadCloser) Close() error             { return nil }
