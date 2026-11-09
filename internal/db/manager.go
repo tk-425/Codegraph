@@ -155,8 +155,7 @@ func (m *Manager) Close() error {
 
 // ClearAll deletes all data (for full rebuild)
 func (m *Manager) ClearAll() error {
-	tables := []string{"calls", "type_hierarchy", "symbols", "file_meta"}
-	for _, table := range tables {
+	for _, table := range graphTables {
 		if _, err := m.db.Exec(fmt.Sprintf("DELETE FROM %s", table)); err != nil {
 			return fmt.Errorf("failed to clear %s: %w", table, err)
 		}
@@ -175,6 +174,9 @@ func (m *Manager) ClearCalls(language string) error {
 	if _, err := m.db.Exec(query, language); err != nil {
 		return fmt.Errorf("failed to clear calls for %s: %w", language, err)
 	}
+	if _, err := m.db.Exec(`DELETE FROM unresolved_relationships WHERE kind = 'call' AND language = ?`, language); err != nil {
+		return fmt.Errorf("failed to clear unresolved calls for %s: %w", language, err)
+	}
 	return nil
 }
 
@@ -188,6 +190,9 @@ func (m *Manager) ClearTypeHierarchy(language string) error {
 
 	if _, err := m.db.Exec(query, language); err != nil {
 		return fmt.Errorf("failed to clear type hierarchy for %s: %w", language, err)
+	}
+	if _, err := m.db.Exec(`DELETE FROM unresolved_relationships WHERE kind != 'call' AND language = ?`, language); err != nil {
+		return fmt.Errorf("failed to clear unresolved type relationships for %s: %w", language, err)
 	}
 	return nil
 }
@@ -222,6 +227,37 @@ func (m *Manager) InsertTypeHierarchy(th *TypeHierarchy) error {
 		th.ChildID, th.ParentID, th.Relationship,
 	)
 	return err
+}
+
+// InsertUnresolved records an unresolved relationship site once.
+func (m *Manager) InsertUnresolved(u *Unresolved) error {
+	_, err := m.db.Exec(`
+		INSERT OR IGNORE INTO unresolved_relationships
+		(kind, language, from_id, target_name, file, line, column, reason, candidates)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		u.Kind, u.Language, u.FromID, u.TargetName, u.File, u.Line, u.Column, u.Reason, u.Candidates,
+	)
+	return err
+}
+
+// GetUnresolved returns every recorded unresolved relationship site.
+func (m *Manager) GetUnresolved() ([]Unresolved, error) {
+	rows, err := m.db.Query(`
+		SELECT kind, language, from_id, target_name, file, line, column, reason, candidates
+		FROM unresolved_relationships ORDER BY file, line, column`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var found []Unresolved
+	for rows.Next() {
+		var u Unresolved
+		if err := rows.Scan(&u.Kind, &u.Language, &u.FromID, &u.TargetName, &u.File, &u.Line, &u.Column, &u.Reason, &u.Candidates); err != nil {
+			return nil, err
+		}
+		found = append(found, u)
+	}
+	return found, rows.Err()
 }
 
 // GetImplementations returns symbols that implement/extend the given parent symbol

@@ -144,32 +144,39 @@ func (h *HierarchyIndexer) IndexHierarchyTreeSitter(ctx context.Context, file Fi
 	}
 	defer tree.Close()
 
-	// Extractors name the child; it is the type of that name declared here.
+	// Extractors name both ends; each resolves on evidence, the child usually
+	// to the type declared in this file. Rust names a type declared elsewhere.
 	relationships := h.extractHierarchy(tree.RootNode(), content, file)
-	symbols, err := loadFileSymbols(h.db, file.Path)
-	if err != nil {
-		return 0, fmt.Errorf("failed to load file symbols: %w", err)
-	}
+	at := evidence{language: file.Language, file: file.Path}
 
 	count := 0
 	for _, rel := range relationships {
-		children := symbols.withName(rel.ChildID, typeKinds)
-		if len(children) != 1 {
+		site := &db.Unresolved{Kind: rel.Relationship, Language: file.Language, File: file.Path}
+		child, err := resolveTarget(h.db, rel.ChildID, typeKinds, at)
+		if err != nil {
+			return count, fmt.Errorf("failed to resolve %s: %w", rel.ChildID, err)
+		}
+		if child.symbol == nil {
+			site.TargetName, site.Reason, site.Candidates = rel.ChildID, child.reason, child.candidates
+			if err := h.db.InsertUnresolved(site); err != nil {
+				return count, err
+			}
 			continue
 		}
-		rel.ChildID = children[0].ID
+		site.FromID, site.Line, site.Column = child.symbol.ID, child.symbol.Line, child.symbol.Column
 
-		// Look up the parent symbol ID by name
-		parentSymbols, err := h.db.GetSymbolByName(rel.ParentID, []string{file.Language})
-		if err != nil || len(parentSymbols) == 0 {
-			// Parent might be in a different language or external - try without language filter
-			parentSymbols, err = h.db.GetSymbolByName(rel.ParentID, nil)
-			if err != nil || len(parentSymbols) == 0 {
-				continue
-			}
+		parent, err := resolveTarget(h.db, rel.ParentID, typeKinds, at)
+		if err != nil {
+			return count, fmt.Errorf("failed to resolve %s: %w", rel.ParentID, err)
 		}
-		// Use the first matching symbol's ID
-		rel.ParentID = parentSymbols[0].ID
+		if parent.symbol == nil {
+			site.TargetName, site.Reason, site.Candidates = rel.ParentID, parent.reason, parent.candidates
+			if err := h.db.InsertUnresolved(site); err != nil {
+				return count, err
+			}
+			continue
+		}
+		rel.ChildID, rel.ParentID = child.symbol.ID, parent.symbol.ID
 
 		if err := h.db.InsertTypeHierarchy(rel); err != nil {
 			continue

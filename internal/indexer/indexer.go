@@ -291,8 +291,12 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 		}
 	}
 
-	fmt.Fprintf(i.progress, "✅ Indexed %d files, skipped %d unchanged, %d symbols, %d calls, %d type relations\n",
-		indexedFiles, skippedFiles, totalSymbols, totalCalls, totalHierarchy)
+	unresolved, err := i.db.GetUnresolved()
+	if err != nil {
+		return fmt.Errorf("failed to count unresolved relationships: %w", err)
+	}
+	fmt.Fprintf(i.progress, "✅ Indexed %d files, skipped %d unchanged, %d symbols, %d calls, %d type relations, %d unresolved sites\n",
+		indexedFiles, skippedFiles, totalSymbols, totalCalls, totalHierarchy, len(unresolved))
 	return nil
 }
 

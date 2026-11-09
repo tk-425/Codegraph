@@ -104,17 +104,6 @@ func (f fileSymbols) enclosing(line, column int, kinds map[string]bool) *db.Symb
 	return best
 }
 
-// withName returns the symbols of one of kinds named name.
-func (f fileSymbols) withName(name string, kinds map[string]bool) []db.Symbol {
-	var found []db.Symbol
-	for _, s := range f {
-		if s.Name == name && kinds[s.Kind] {
-			found = append(found, s)
-		}
-	}
-	return found
-}
-
 // before reports whether position a is strictly before position b.
 func before(aLine, aColumn, bLine, bColumn int) bool {
 	return aLine < bLine || (aLine == bLine && aColumn < bColumn)

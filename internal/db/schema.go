@@ -48,6 +48,23 @@ CREATE TABLE IF NOT EXISTS type_hierarchy (
     FOREIGN KEY(parent_id) REFERENCES symbols(id)
 );`
 
+	// CreateUnresolvedTable holds observed relationship sites whose target
+	// could not be identified safely. They are never resolved edges (I06).
+	CreateUnresolvedTable = `
+CREATE TABLE IF NOT EXISTS unresolved_relationships (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    language TEXT NOT NULL,
+    from_id TEXT NOT NULL DEFAULT '',
+    target_name TEXT NOT NULL,
+    file TEXT NOT NULL,
+    line INTEGER NOT NULL,
+    column INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    candidates INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(kind, file, line, column, from_id, target_name)
+);`
+
 	CreateFileMetaTable = `
 CREATE TABLE IF NOT EXISTS file_meta (
     path TEXT PRIMARY KEY,
@@ -69,7 +86,7 @@ CREATE INDEX IF NOT EXISTS idx_type_hierarchy_parent ON type_hierarchy(parent_id
 )
 
 // graphTables are the tables a format reset drops, children first.
-var graphTables = []string{"calls", "type_hierarchy", "symbols", "file_meta"}
+var graphTables = []string{"calls", "type_hierarchy", "unresolved_relationships", "symbols", "file_meta"}
 
 // AllSchemaStatements returns all SQL statements needed to create the schema
 func AllSchemaStatements() []string {
@@ -77,6 +94,7 @@ func AllSchemaStatements() []string {
 		CreateSymbolsTable,
 		CreateCallsTable,
 		CreateTypeHierarchyTable,
+		CreateUnresolvedTable,
 		CreateFileMetaTable,
 		CreateIndexes,
 	}

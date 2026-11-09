@@ -189,31 +189,50 @@ func (c *CallExtractor) ExtractCalls(ctx context.Context, file FileInfo) (int, e
 	}
 
 	var calls []*db.Call
+	var unresolved []*db.Unresolved
+	var resolveErr error
 	walk(tree.RootNode(), func(n *sitter.Node) {
-		if !syntax.isCall(n) {
+		if resolveErr != nil || !syntax.isCall(n) {
 			return
 		}
-		name, _ := syntax.callee(n)
+		name, object := syntax.callee(n)
 		if name == nil {
 			return
 		}
 		line, column := nodePosition(name)
+		site := &db.Unresolved{Kind: "call", Language: file.Language, TargetName: name.Content(content), File: file.Path, Line: line, Column: column}
 		caller := symbols.enclosing(line, column, callableKinds)
 		if caller == nil {
+			site.Reason = reasonUnresolved
+			unresolved = append(unresolved, site)
 			return
 		}
-		calleeID := c.resolveSymbolID(name.Content(content), file.Language)
-		if calleeID == "" {
+		site.FromID = caller.ID
+		at := evidence{language: file.Language, file: file.Path}
+		if object != nil && provesOwner(object, n, file.Language, content) {
+			at.owner = caller.Scope
+		}
+		target, err := resolveTarget(c.db, site.TargetName, callableKinds, at)
+		if err != nil {
+			resolveErr = err
+			return
+		}
+		if target.symbol == nil {
+			site.Reason, site.Candidates = target.reason, target.candidates
+			unresolved = append(unresolved, site)
 			return
 		}
 		calls = append(calls, &db.Call{
 			CallerID: caller.ID,
-			CalleeID: calleeID,
+			CalleeID: target.symbol.ID,
 			File:     file.Path,
 			Line:     line,
 			Column:   column,
 		})
 	})
+	if resolveErr != nil {
+		return 0, fmt.Errorf("failed to resolve calls: %w", resolveErr)
+	}
 
 	count := 0
 	for _, call := range calls {
@@ -223,20 +242,43 @@ func (c *CallExtractor) ExtractCalls(ctx context.Context, file FileInfo) (int, e
 		}
 		count++
 	}
+	for _, site := range unresolved {
+		if err := c.db.InsertUnresolved(site); err != nil {
+			return count, fmt.Errorf("failed to record unresolved call: %w", err)
+		}
+	}
 
 	return count, nil
 }
 
-// resolveSymbolID looks up a symbol ID from the database
-func (c *CallExtractor) resolveSymbolID(name string, language string) string {
-	// Try to find the symbol in the database
-	symbols, err := c.db.GetSymbolByName(name, []string{language})
-	if err != nil || len(symbols) == 0 {
-		// Try without language filter
-		symbols, err = c.db.GetSymbolByName(name, nil)
-		if err != nil || len(symbols) == 0 {
-			return ""
+// selfNames are the receivers that prove a member call stays in the
+// caller's own type.
+var selfNames = map[string]bool{"self": true, "this": true, "cls": true}
+
+// provesOwner reports whether object, the receiver of a member call, is the
+// enclosing method's own instance: self/this, or a Go method's receiver
+// variable.
+func provesOwner(object, call *sitter.Node, language string, content []byte) bool {
+	text := object.Content(content)
+	if language != "go" {
+		return selfNames[text]
+	}
+	for n := call.Parent(); n != nil; n = n.Parent() {
+		switch n.Type() {
+		case "func_literal", "function_declaration":
+			return false
+		case "method_declaration":
+			receiver := n.ChildByFieldName("receiver")
+			if receiver == nil {
+				return false
+			}
+			for i := 0; i < int(receiver.NamedChildCount()); i++ {
+				if param := receiver.NamedChild(i).ChildByFieldName("name"); param != nil && param.Content(content) == text {
+					return true
+				}
+			}
+			return false
 		}
 	}
-	return symbols[0].ID
+	return false
 }

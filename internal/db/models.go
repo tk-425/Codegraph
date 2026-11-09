@@ -62,3 +62,19 @@ type FileMeta struct {
 	ModTime  time.Time `json:"mod_time"`
 	Language string    `json:"language"`
 }
+
+// Unresolved is an observed relationship site whose target could not be
+// identified safely: no candidate ("unresolved"), several ("ambiguous"), a
+// target outside the project ("external"), or a reference with no
+// invocation evidence ("unvalidated").
+type Unresolved struct {
+	Kind       string `json:"kind"` // call, extends, implements, embeds
+	Language   string `json:"language"`
+	FromID     string `json:"from_id"` // the resolved local endpoint, if any
+	TargetName string `json:"target_name"`
+	File       string `json:"file"`
+	Line       int    `json:"line"`
+	Column     int    `json:"column"`
+	Reason     string `json:"reason"`
+	Candidates int    `json:"candidates"`
+}
