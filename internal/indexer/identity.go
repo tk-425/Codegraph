@@ -3,6 +3,7 @@ package indexer
 import (
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -50,4 +51,18 @@ func goReceiverType(expr string) string {
 		expr = expr[:i]
 	}
 	return strings.TrimSpace(expr)
+}
+
+// idAllocator assigns IDs within one file's extraction. A key seen again
+// (an overload, or a redeclaration in the same scope) gets a source-order
+// ordinal, so no declaration overwrites another.
+type idAllocator map[string]int
+
+func (a idAllocator) assign(key symbolKey) string {
+	id := key.ID()
+	a[id]++
+	if n := a[id]; n > 1 {
+		return id + "~" + strconv.Itoa(n)
+	}
+	return id
 }

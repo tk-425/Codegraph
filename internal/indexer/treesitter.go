@@ -61,7 +61,7 @@ func (t *TreeSitterIndexer) IndexFile(ctx context.Context, file FileInfo) (int, 
 	defer tree.Close()
 
 	// Extract symbols from the tree
-	symbols := t.extractSymbols(tree.RootNode(), content, file, nil)
+	symbols := t.extractSymbols(tree.RootNode(), content, file, nil, idAllocator{})
 
 	// Store symbols in database
 	for _, sym := range symbols {
@@ -112,11 +112,12 @@ func (t *TreeSitterIndexer) getLanguage(lang string) *sitter.Language {
 
 // extractSymbols walks the AST and extracts symbol definitions
 // owners is the lexical owner chain of node, outermost first.
-func (t *TreeSitterIndexer) extractSymbols(node *sitter.Node, content []byte, file FileInfo, owners []string) []*db.Symbol {
+func (t *TreeSitterIndexer) extractSymbols(node *sitter.Node, content []byte, file FileInfo, owners []string, ids idAllocator) []*db.Symbol {
 	var symbols []*db.Symbol
 
 	// Check if this node is a symbol we care about
 	if sym, key := t.nodeToSymbol(node, content, file, owners); sym != nil {
+		sym.ID = ids.assign(key)
 		symbols = append(symbols, sym)
 		// Children are owned by this symbol
 		owners = append(append([]string(nil), key.Owners...), key.Name)
@@ -125,7 +126,7 @@ func (t *TreeSitterIndexer) extractSymbols(node *sitter.Node, content []byte, fi
 	// Recursively process children
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		child := node.NamedChild(i)
-		childSymbols := t.extractSymbols(child, content, file, owners)
+		childSymbols := t.extractSymbols(child, content, file, owners, ids)
 		symbols = append(symbols, childSymbols...)
 	}
 

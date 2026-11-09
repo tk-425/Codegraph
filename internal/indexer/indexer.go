@@ -352,7 +352,7 @@ func (i *Indexer) indexFile(ctx context.Context, client *lsp.Client, file FileIn
 
 	// Store symbols in database
 	count := 0
-	if err := i.storeSymbols(file, symbols, nil, &count); err != nil {
+	if err := i.storeSymbols(file, symbols, nil, idAllocator{}, &count); err != nil {
 		return 0, err
 	}
 
@@ -365,7 +365,7 @@ func (i *Indexer) indexFile(ctx context.Context, client *lsp.Client, file FileIn
 }
 
 // storeSymbols recursively stores symbols in the database
-func (i *Indexer) storeSymbols(file FileInfo, symbols []lsp.DocumentSymbol, owners []string, count *int) error {
+func (i *Indexer) storeSymbols(file FileInfo, symbols []lsp.DocumentSymbol, owners []string, ids idAllocator, count *int) error {
 	for _, sym := range symbols {
 		key := symbolKey{Language: file.Language, RelPath: file.RelPath, Owners: owners, Name: sym.Name}
 		if file.Language == "go" {
@@ -377,7 +377,7 @@ func (i *Indexer) storeSymbols(file FileInfo, symbols []lsp.DocumentSymbol, owne
 
 		// Create database symbol
 		dbSym := &db.Symbol{
-			ID:            key.ID(),
+			ID:            ids.assign(key),
 			Name:          key.Name,
 			Kind:          lsp.SymbolKindToString(sym.Kind),
 			File:          file.Path,
@@ -401,7 +401,7 @@ func (i *Indexer) storeSymbols(file FileInfo, symbols []lsp.DocumentSymbol, owne
 		// Recursively process children
 		if len(sym.Children) > 0 {
 			childOwners := append(append([]string(nil), key.Owners...), key.Name)
-			if err := i.storeSymbols(file, sym.Children, childOwners, count); err != nil {
+			if err := i.storeSymbols(file, sym.Children, childOwners, ids, count); err != nil {
 				return err
 			}
 		}
