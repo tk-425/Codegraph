@@ -61,7 +61,7 @@ func (t *TreeSitterIndexer) IndexFile(ctx context.Context, file FileInfo) (int, 
 	defer tree.Close()
 
 	// Extract symbols from the tree
-	symbols := t.extractSymbols(tree.RootNode(), content, file, "")
+	symbols := t.extractSymbols(tree.RootNode(), content, file, nil)
 
 	// Store symbols in database
 	for _, sym := range symbols {
@@ -111,20 +111,21 @@ func (t *TreeSitterIndexer) getLanguage(lang string) *sitter.Language {
 }
 
 // extractSymbols walks the AST and extracts symbol definitions
-func (t *TreeSitterIndexer) extractSymbols(node *sitter.Node, content []byte, file FileInfo, scope string) []*db.Symbol {
+// owners is the lexical owner chain of node, outermost first.
+func (t *TreeSitterIndexer) extractSymbols(node *sitter.Node, content []byte, file FileInfo, owners []string) []*db.Symbol {
 	var symbols []*db.Symbol
 
 	// Check if this node is a symbol we care about
-	if sym := t.nodeToSymbol(node, content, file, scope); sym != nil {
+	if sym, key := t.nodeToSymbol(node, content, file, owners); sym != nil {
 		symbols = append(symbols, sym)
-		// Update scope for children
-		scope = sym.Name
+		// Children are owned by this symbol
+		owners = append(append([]string(nil), key.Owners...), key.Name)
 	}
 
 	// Recursively process children
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		child := node.NamedChild(i)
-		childSymbols := t.extractSymbols(child, content, file, scope)
+		childSymbols := t.extractSymbols(child, content, file, owners)
 		symbols = append(symbols, childSymbols...)
 	}
 
@@ -132,7 +133,7 @@ func (t *TreeSitterIndexer) extractSymbols(node *sitter.Node, content []byte, fi
 }
 
 // nodeToSymbol converts a tree-sitter node to a Symbol if applicable
-func (t *TreeSitterIndexer) nodeToSymbol(node *sitter.Node, content []byte, file FileInfo, scope string) *db.Symbol {
+func (t *TreeSitterIndexer) nodeToSymbol(node *sitter.Node, content []byte, file FileInfo, owners []string) (*db.Symbol, symbolKey) {
 	var name, kind, signature string
 
 	switch file.Language {
@@ -157,17 +158,18 @@ func (t *TreeSitterIndexer) nodeToSymbol(node *sitter.Node, content []byte, file
 	case "csharp":
 		name, kind, signature = t.extractCSharpSymbol(node, content)
 	default:
-		return nil
+		return nil, symbolKey{}
 	}
 
 	if name == "" {
-		return nil
+		return nil, symbolKey{}
 	}
 
-	// Create symbol ID
-	id := fmt.Sprintf("%s#%s", file.RelPath, name)
-	if scope != "" {
-		id = fmt.Sprintf("%s#%s.%s", file.RelPath, scope, name)
+	key := symbolKey{Language: file.Language, RelPath: file.RelPath, Owners: owners, Name: name}
+	if file.Language == "go" && node.Type() == "method_declaration" {
+		if receiver := goMethodReceiver(node, content); receiver != "" {
+			key.Owners = append(append([]string(nil), owners...), receiver)
+		}
 	}
 
 	startLine := int(node.StartPoint().Row) + 1
@@ -176,7 +178,7 @@ func (t *TreeSitterIndexer) nodeToSymbol(node *sitter.Node, content []byte, file
 	endCol := int(node.EndPoint().Column)
 
 	return &db.Symbol{
-		ID:        id,
+		ID:        key.ID(),
 		Name:      name,
 		Kind:      kind,
 		File:      file.Path,
@@ -184,12 +186,30 @@ func (t *TreeSitterIndexer) nodeToSymbol(node *sitter.Node, content []byte, file
 		Column:    startCol,
 		EndLine:   &endLine,
 		EndColumn: &endCol,
-		Scope:     scope,
+		Scope:     key.Scope(),
 		Signature: signature,
 		Language:  file.Language,
 		Source:    "tree-sitter",
 		CreatedAt: time.Now(),
+	}, key
+}
+
+// goMethodReceiver returns the receiver type name of a Go method declaration.
+func goMethodReceiver(node *sitter.Node, content []byte) string {
+	receiver := node.ChildByFieldName("receiver")
+	if receiver == nil {
+		return ""
 	}
+	for i := 0; i < int(receiver.NamedChildCount()); i++ {
+		param := receiver.NamedChild(i)
+		if param.Type() != "parameter_declaration" {
+			continue
+		}
+		if typeNode := param.ChildByFieldName("type"); typeNode != nil {
+			return goReceiverType(typeNode.Content(content))
+		}
+	}
+	return ""
 }
 
 // Language-specific extractors

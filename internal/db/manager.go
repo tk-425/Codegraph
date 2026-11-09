@@ -62,11 +62,21 @@ func OpenReadOnly(dbPath string) (*Manager, error) {
 	return &Manager{db: db, dbPath: dbPath}, nil
 }
 
-// Initialize creates all tables and indexes
+// Initialize creates all tables and indexes. A database created here is
+// stamped with the current FormatVersion.
 func (m *Manager) Initialize() error {
+	var existing int
+	if err := m.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'symbols'`).Scan(&existing); err != nil {
+		return fmt.Errorf("failed to inspect schema: %w", err)
+	}
 	for _, stmt := range AllSchemaStatements() {
 		if _, err := m.db.Exec(stmt); err != nil {
 			return fmt.Errorf("failed to execute schema statement: %w", err)
+		}
+	}
+	if existing == 0 {
+		if _, err := m.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", FormatVersion)); err != nil {
+			return fmt.Errorf("failed to stamp format version: %w", err)
 		}
 	}
 	return nil
@@ -220,24 +230,22 @@ func (m *Manager) SearchSymbols(name string, kind string, languages []string) ([
 
 // GetCallers finds all callers of a symbol with call site info
 func (m *Manager) GetCallers(symbolName string, languages []string) ([]CallerInfo, error) {
-	// Join calls table to find caller symbols
-	// callee_id format varies:
-	// - Go: path#FunctionName
-	// - Java: path#Class.methodName(params)
-	// - C#: path#ClassName.MethodName
-	// We need to match when symbolName appears after # or after . (for method names)
+	// Match the callee symbol's name, never its ID encoding:
+	// - Exact match: main
+	// - Method with params: main(String[])
+	// - Qualified: Class.main(
 	query := `
 		SELECT s.id, s.name, s.kind, s.file, s.line, s.column, s.end_line, s.end_column, 
 		       s.scope, s.signature, s.documentation, s.language, s.source, s.created_at,
 		       c.file as call_file, c.line as call_line, c.column as call_column
 		FROM symbols s
 		JOIN calls c ON s.id = c.caller_id
-		WHERE (c.callee_id LIKE ? OR c.callee_id LIKE ? OR c.callee_id LIKE ?)`
-	// Match: #symbolName, #Class.symbolName, or .symbolName(
+		JOIN symbols callee ON c.callee_id = callee.id
+		WHERE (callee.name = ? OR callee.name LIKE ? OR callee.name LIKE ?)`
 	args := []interface{}{
-		"%#" + symbolName,          // Exact function: path#FunctionName
-		"%#%." + symbolName + "(%", // Method with params: path#Class.method(
-		"%." + symbolName,          // Method without params: path#Class.method
+		symbolName,               // Exact match
+		symbolName + "(%",        // Method with params: main(
+		"%." + symbolName + "(%", // Qualified with params: Class.main(
 	}
 
 	if len(languages) > 0 {

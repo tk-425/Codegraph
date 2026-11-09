@@ -1,5 +1,9 @@
 package db
 
+// FormatVersion is the index format stored in PRAGMA user_version. Format 2
+// changed symbol identity; databases created earlier report 0.
+const FormatVersion = 2
+
 // SQL statements for creating the database schema
 const (
 	CreateSymbolsTable = `

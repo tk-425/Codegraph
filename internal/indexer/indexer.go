@@ -352,7 +352,7 @@ func (i *Indexer) indexFile(ctx context.Context, client *lsp.Client, file FileIn
 
 	// Store symbols in database
 	count := 0
-	if err := i.storeSymbols(file, symbols, "", &count); err != nil {
+	if err := i.storeSymbols(file, symbols, nil, &count); err != nil {
 		return 0, err
 	}
 
@@ -365,25 +365,27 @@ func (i *Indexer) indexFile(ctx context.Context, client *lsp.Client, file FileIn
 }
 
 // storeSymbols recursively stores symbols in the database
-func (i *Indexer) storeSymbols(file FileInfo, symbols []lsp.DocumentSymbol, scope string, count *int) error {
+func (i *Indexer) storeSymbols(file FileInfo, symbols []lsp.DocumentSymbol, owners []string, count *int) error {
 	for _, sym := range symbols {
-		// Create symbol ID
-		id := fmt.Sprintf("%s#%s", file.RelPath, sym.Name)
-		if scope != "" {
-			id = fmt.Sprintf("%s#%s.%s", file.RelPath, scope, sym.Name)
+		key := symbolKey{Language: file.Language, RelPath: file.RelPath, Owners: owners, Name: sym.Name}
+		if file.Language == "go" {
+			if receiver, method, ok := splitGoReceiver(sym.Name); ok {
+				key.Owners = append(append([]string(nil), owners...), receiver)
+				key.Name = method
+			}
 		}
 
 		// Create database symbol
 		dbSym := &db.Symbol{
-			ID:            id,
-			Name:          sym.Name,
+			ID:            key.ID(),
+			Name:          key.Name,
 			Kind:          lsp.SymbolKindToString(sym.Kind),
 			File:          file.Path,
 			Line:          sym.SelectionRange.Start.Line + 1, // LSP is 0-indexed
 			Column:        sym.SelectionRange.Start.Character,
 			EndLine:       intPtr(sym.Range.End.Line + 1),
 			EndColumn:     intPtr(sym.Range.End.Character),
-			Scope:         scope,
+			Scope:         key.Scope(),
 			Signature:     extractReturnType(sym.Detail, file.Language),
 			Documentation: "",
 			Language:      file.Language,
@@ -398,11 +400,8 @@ func (i *Indexer) storeSymbols(file FileInfo, symbols []lsp.DocumentSymbol, scop
 
 		// Recursively process children
 		if len(sym.Children) > 0 {
-			childScope := sym.Name
-			if scope != "" {
-				childScope = scope + "." + sym.Name
-			}
-			if err := i.storeSymbols(file, sym.Children, childScope, count); err != nil {
+			childOwners := append(append([]string(nil), key.Owners...), key.Name)
+			if err := i.storeSymbols(file, sym.Children, childOwners, count); err != nil {
 				return err
 			}
 		}
