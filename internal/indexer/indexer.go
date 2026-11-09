@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -90,7 +89,7 @@ func waitForServerSettle(ctx context.Context, language string) error {
 // NewIndexer creates a new indexer
 func NewIndexer(cfg *config.Config, dbManager *db.Manager, rootPath string) *Indexer {
 	absPath, _ := filepath.Abs(rootPath)
-	rootURI := "file://" + absPath
+	rootURI := lsp.NewRoot(absPath).URI()
 
 	return &Indexer{
 		cfg:         cfg,
@@ -329,7 +328,7 @@ func (i *Indexer) shouldSkipFile(file FileInfo) (bool, error) {
 // indexFile indexes a single file and returns number of symbols stored
 func (i *Indexer) indexFile(ctx context.Context, client *lsp.Client, file FileInfo) (int, error) {
 	// Convert path to URI
-	fileURI := pathToURI(file.Path)
+	fileURI := lsp.PathToURI(file.Path)
 
 	// Read file content
 	content, err := os.ReadFile(file.Path)
@@ -416,15 +415,6 @@ func (i *Indexer) Close() error {
 }
 
 // Helper functions
-
-func pathToURI(path string) string {
-	absPath, _ := filepath.Abs(path)
-	u := url.URL{
-		Scheme: "file",
-		Path:   absPath,
-	}
-	return u.String()
-}
 
 func intPtr(i int) *int {
 	return &i

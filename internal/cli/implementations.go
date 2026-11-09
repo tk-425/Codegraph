@@ -88,8 +88,8 @@ func runImplementations(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create LSP manager
-	rootURI := "file://" + cwd
-	lspManager := lsp.NewManager(cfg, rootURI)
+	root := lsp.NewRoot(cwd)
+	lspManager := lsp.NewManager(cfg, root.URI())
 	defer shutdownLiveLSP(cmd, lspManager)
 
 	ctx := commandContext(cmd)
@@ -108,7 +108,7 @@ func runImplementations(cmd *cobra.Command, args []string) error {
 		}
 
 		// Get implementations via LSP
-		fileURI := "file://" + sym.File
+		fileURI := lsp.PathToURI(sym.File)
 		pos := lsp.Position{
 			Line:      sym.Line - 1,
 			Character: sym.Column,
@@ -130,7 +130,10 @@ func runImplementations(cmd *cobra.Command, args []string) error {
 			}
 
 			for _, impl := range implementations {
-				implPath := strings.TrimPrefix(impl.URI, "file://")
+				implPath, perr := root.Path(impl.URI)
+				if perr != nil {
+					implPath = impl.URI
+				}
 
 				relPath, _ := filepath.Rel(cwd, implPath)
 				fmt.Printf("  %s\n", Path(fmt.Sprintf("%s:%d", relPath, impl.Range.Start.Line+1)))
@@ -195,8 +198,8 @@ func runImplementationsJSON(cmd *cobra.Command, interfaceName string) error {
 		return EmitJSON(out, "implementations", &interfaceName, records, nil)
 	}
 
-	rootURI := "file://" + cwd
-	lspManager := lsp.NewManager(cfg, rootURI)
+	root := lsp.NewRoot(cwd)
+	lspManager := lsp.NewManager(cfg, root.URI())
 	defer shutdownLiveLSP(cmd, lspManager)
 
 	ctx := commandContext(cmd)
@@ -208,7 +211,7 @@ func runImplementationsJSON(cmd *cobra.Command, interfaceName string) error {
 		if cerr != nil {
 			continue
 		}
-		fileURI := "file://" + sym.File
+		fileURI := lsp.PathToURI(sym.File)
 		pos := lsp.Position{Line: sym.Line - 1, Character: sym.Column}
 		impls, ierr := client.Implementation(ctx, fileURI, pos)
 		if ierr != nil {
@@ -219,7 +222,10 @@ func runImplementationsJSON(cmd *cobra.Command, interfaceName string) error {
 			continue
 		}
 		for _, impl := range impls {
-			implPath := strings.TrimPrefix(impl.URI, "file://")
+			implPath, perr := root.Path(impl.URI)
+			if perr != nil {
+				implPath = impl.URI
+			}
 			relPath, rerr := filepath.Rel(cwd, implPath)
 			if rerr != nil {
 				relPath = implPath

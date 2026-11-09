@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/tk-425/Codegraph/internal/db"
 	"github.com/tk-425/Codegraph/internal/lsp"
@@ -52,9 +51,10 @@ func (c *CallGraphIndexer) IndexCallGraph(ctx context.Context, language string) 
 
 	callCount := 0
 	openedFiles := make(map[string]bool)
+	root := lsp.NewRoot(c.rootPath)
 
 	for _, sym := range symbols {
-		fileURI := "file://" + sym.File
+		fileURI := lsp.PathToURI(sym.File)
 
 		// Open file if not already opened
 		if !openedFiles[fileURI] {
@@ -87,7 +87,10 @@ func (c *CallGraphIndexer) IndexCallGraph(ctx context.Context, language string) 
 
 		// Each reference is a potential call site
 		for _, ref := range refs {
-			refPath := uriToPath(ref.URI)
+			refPath, err := root.Path(ref.URI)
+			if err != nil {
+				continue
+			}
 			
 			// Skip if same location as declaration
 			if refPath == sym.File && ref.Range.Start.Line+1 == sym.Line {
@@ -159,13 +162,6 @@ func (c *CallGraphIndexer) findContainingFunction(file string, line int, languag
 }
 
 // Helper functions
-
-func uriToPath(uri string) string {
-	if strings.HasPrefix(uri, "file://") {
-		return uri[7:]
-	}
-	return uri
-}
 
 func readFileContent(path string) (string, error) {
 	data, err := os.ReadFile(path)

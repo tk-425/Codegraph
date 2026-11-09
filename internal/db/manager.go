@@ -25,18 +25,28 @@ func NewManager(dbPath string) (*Manager, error) {
 		return nil, fmt.Errorf("failed to create database directory: %w", err)
 	}
 
-	db, err := sql.Open("sqlite3", dbPath)
+	absPath, err := filepath.Abs(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
-
-	// Enable foreign keys
-	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
+	// Foreign keys are a per-connection setting, so the DSN carries it to
+	// every pooled connection.
+	db, err := sql.Open("sqlite3", fileDSN(absPath, "_foreign_keys=on"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database: %w", err)
+	}
+	if err := db.Ping(); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("failed to enable foreign keys: %w", err)
+		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
 	return &Manager{db: db, dbPath: dbPath}, nil
+}
+
+// fileDSN is a go-sqlite3 URI DSN for an absolute path. The path is
+// percent-encoded, so '?', '#' and spaces in directory names stay part of it.
+func fileDSN(absPath, query string) string {
+	return (&url.URL{Scheme: "file", Path: absPath, RawQuery: query}).String()
 }
 
 // OpenReadOnly opens an existing database for queries. It never creates the
@@ -50,8 +60,7 @@ func OpenReadOnly(dbPath string) (*Manager, error) {
 	if _, err := os.Stat(absPath); err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
-	dsn := (&url.URL{Scheme: "file", Path: absPath, RawQuery: "mode=ro"}).String()
-	db, err := sql.Open("sqlite3", dsn)
+	db, err := sql.Open("sqlite3", fileDSN(absPath, "mode=ro"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}

@@ -16,7 +16,14 @@ import (
 // all absent, so builds use tree-sitter only.
 func newSyntaxProject(t *testing.T, files map[string]string) string {
 	t.Helper()
-	root := t.TempDir()
+	return newSyntaxProjectAt(t, t.TempDir(), files)
+}
+
+func newSyntaxProjectAt(t *testing.T, root string, files map[string]string) string {
+	t.Helper()
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	cfg := config.DefaultConfig()
 	for language := range cfg.LSP {
 		cfg.LSP[language] = config.LSPConfig{Command: filepath.Join(root, "unavailable-lsp")}
@@ -129,5 +136,20 @@ func TestLegacyIndexFormatRequiresExplicitRebuild(t *testing.T) {
 	}
 	if found := requireOneEnvelope(t, runCLI(t, root, "search", "Target", "--json", "--exact")); found.Count != 1 {
 		t.Errorf("search after rebuild = %d, want 1", found.Count)
+	}
+}
+
+// T40: a project whose path needs percent-encoding builds and answers queries.
+func TestAwkwardProjectPathBuildsAndQueries(t *testing.T) {
+	root := newSyntaxProjectAt(t, filepath.Join(t.TempDir(), "a ?#é𝔘 b"), map[string]string{
+		"dir #1/source.go": "package fixture\n\nfunc Target() {}\n",
+	})
+	requireBuild(t, root)
+	result := runCLI(t, root, "search", "Target", "--json", "--exact")
+	if found := requireOneEnvelope(t, result); found.Count != 1 {
+		t.Fatalf("search in awkward path found %d: %s; stderr=%s", found.Count, result.stdout, result.stderr)
+	}
+	if !bytes.Contains(result.stdout, []byte("dir #1/source.go")) {
+		t.Errorf("result path not preserved: %s", result.stdout)
 	}
 }

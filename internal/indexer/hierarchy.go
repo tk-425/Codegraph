@@ -60,7 +60,7 @@ func (h *HierarchyIndexer) IndexHierarchyLSP(ctx context.Context, language strin
 	openedFiles := make(map[string]bool)
 
 	for _, sym := range symbols {
-		fileURI := "file://" + sym.File
+		fileURI := lsp.PathToURI(sym.File)
 
 		// Open file if not already opened
 		if !openedFiles[fileURI] {
