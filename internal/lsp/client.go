@@ -38,6 +38,8 @@ type Client struct {
 	nextID      int64
 	pending     map[int64]chan *Response
 	initialized bool
+	// capabilities are the server's, recorded at initialization.
+	capabilities ServerCapabilities
 
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -267,7 +269,17 @@ func (c *Client) Initialize(ctx context.Context) (*InitializeResult, error) {
 	}
 
 	c.initialized = true
+	c.capabilities = result.Capabilities
 	return &result, nil
+}
+
+// Capabilities returns the server capabilities from initialization.
+func (c *Client) Capabilities() ServerCapabilities { return c.capabilities }
+
+// PositionEncoding is the encoding of every position this server sends and
+// expects.
+func (c *Client) PositionEncoding() PositionEncoding {
+	return negotiatedEncoding(c.capabilities.PositionEncoding)
 }
 
 // Shutdown asks the server to exit within the graceful budget, then kills it

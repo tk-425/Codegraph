@@ -23,13 +23,16 @@ jobs:
         run: go build ./...
       - name: Ordinary tests
         run: go test ./...
-      - name: Characterization controls and S1-fixed cases
-        # F06 (transport) and F08 (JSON boundary) were fixed by S1 and now gate.
-        run: go test -tags characterization -run '^TestCharacterization(Control|F06|F08)' -count=1 -timeout=120s ./...
+      - name: Characterization controls and fixed cases
+        # F06 (transport) and F08 (JSON boundary) were fixed by S1; F02
+        # (identity), F03 (reference vs call) and F04 (hierarchy) by S2.
+        run: go test -tags characterization -run '^TestCharacterization(Control|F02|F03|F04|F06|F08)' -count=1 -timeout=180s ./...
       - name: Vet
         run: go vet ./...
       - name: Format S0 and S1 files
         # Existing formatting debt is recorded in the fix-spec, not auto-fixed here.
+        # Two fixtures keep a layout gofmt would undo: same-line recursion
+        # (T15) and a non-BMP character before a name on one line (T40).
         run: |
           unformatted="$(gofmt -l \
             cmd/codegraph/characterization_test.go \
@@ -49,7 +52,8 @@ jobs:
             internal/lsp/client.go internal/lsp/client_test.go \
             internal/lsp/manager.go internal/lsp/manager_test.go \
             internal/lsp/diagnostics.go internal/lsp/lifecycle_test.go \
-            internal/lsp/main_test.go internal/search/orchestrator_test.go)"
+            internal/lsp/main_test.go internal/search/orchestrator_test.go \
+            | awk '!/^testdata\/characterization\/(calls\/lines|positions\/nonbmp)\.go$/')"
           if [ -n "$unformatted" ]; then
             printf '%s\n' "$unformatted"
             exit 1

@@ -19,9 +19,8 @@ func TestOpenReadOnlyDoesNotCreateMissingDatabase(t *testing.T) {
 }
 
 func TestOpenReadOnlyReadsButRejectsWrites(t *testing.T) {
-	// Spaces, '#' and '%' must survive URI encoding. A literal '?' is a known
-	// go-sqlite3 DSN limit shared with read-write opens (path work is R09).
-	for _, dir := range []string{"plain", "with space", "hash#dir", "pct%dir"} {
+	// Spaces, '#', '%', '?' and non-ASCII must survive URI encoding (T40).
+	for _, dir := range []string{"plain", "with space", "hash#dir", "pct%dir", "q?dir", "é𝔘dir"} {
 		t.Run(dir, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), dir, "codegraph.db")
 			writer, err := NewManager(path)
@@ -45,5 +44,24 @@ func TestOpenReadOnlyReadsButRejectsWrites(t *testing.T) {
 				t.Fatal("read-only database accepted a write")
 			}
 		})
+	}
+}
+
+// I02: every pooled connection enforces foreign keys, so a relationship can
+// never name a symbol that is not stored.
+func TestForeignKeysHoldOnEveryConnection(t *testing.T) {
+	m, err := NewManager(filepath.Join(t.TempDir(), "codegraph.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	if err := m.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	m.db.SetMaxIdleConns(0) // force a fresh connection per statement
+	for i := 0; i < 3; i++ {
+		if err := m.InsertCall(&Call{CallerID: "missing", CalleeID: "missing", File: "f", Line: 1}); err == nil {
+			t.Fatalf("attempt %d: dangling call endpoint accepted", i)
+		}
 	}
 }

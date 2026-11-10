@@ -7,14 +7,6 @@ import (
 	"time"
 
 	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/csharp"
-	"github.com/smacker/go-tree-sitter/golang"
-	"github.com/smacker/go-tree-sitter/java"
-	"github.com/smacker/go-tree-sitter/ocaml"
-	"github.com/smacker/go-tree-sitter/python"
-	"github.com/smacker/go-tree-sitter/rust"
-	"github.com/smacker/go-tree-sitter/swift"
-	"github.com/smacker/go-tree-sitter/typescript/typescript"
 	"github.com/tk-425/Codegraph/internal/db"
 	"github.com/tk-425/Codegraph/internal/lsp"
 )
@@ -58,9 +50,19 @@ func (h *HierarchyIndexer) IndexHierarchyLSP(ctx context.Context, language strin
 
 	count := 0
 	openedFiles := make(map[string]bool)
+	lines := lsp.NewSourceLines()
+	enc := client.PositionEncoding()
+	pass := &hierarchyPass{
+		db:       h.db,
+		language: language,
+		root:     lsp.NewRoot(h.rootPath),
+		lines:    lines,
+		enc:      enc,
+		symbols:  map[string]fileSymbols{},
+	}
 
 	for _, sym := range symbols {
-		fileURI := "file://" + sym.File
+		fileURI := lsp.PathToURI(sym.File)
 
 		// Open file if not already opened
 		if !openedFiles[fileURI] {
@@ -76,10 +78,7 @@ func (h *HierarchyIndexer) IndexHierarchyLSP(ctx context.Context, language strin
 		}
 
 		// Get supertypes for this symbol
-		pos := lsp.Position{
-			Line:      sym.Line - 1,
-			Character: sym.Column,
-		}
+		pos := lines.ToLSP(enc, sym.File, sym.Line, sym.Column)
 
 		// Prepare type hierarchy at this position
 		items, err := client.PrepareTypeHierarchy(ctx, fileURI, pos)
@@ -106,21 +105,13 @@ func (h *HierarchyIndexer) IndexHierarchyLSP(ctx context.Context, language strin
 		}
 
 		for _, parent := range supertypes {
-			relationship := "extends"
-			if sym.Kind == "class" && parent.Kind == lsp.SymbolKindInterface {
-				relationship = "implements"
+			stored, err := pass.parent(sym, parent)
+			if err != nil {
+				return count, err
 			}
-
-			th := &db.TypeHierarchy{
-				ChildID:      sym.ID,
-				ParentID:     parent.Name, // Will be resolved to ID later
-				Relationship: relationship,
+			if stored {
+				count++
 			}
-
-			if err := h.db.InsertTypeHierarchy(th); err != nil {
-				continue
-			}
-			count++
 		}
 	}
 
@@ -132,9 +123,84 @@ func (h *HierarchyIndexer) IndexHierarchyLSP(ctx context.Context, language strin
 	return count, nil
 }
 
+// hierarchyPass holds what one hierarchy pass learns about each file.
+type hierarchyPass struct {
+	db       *db.Manager
+	language string
+	root     lsp.Root
+	lines    *lsp.SourceLines
+	enc      lsp.PositionEncoding
+	symbols  map[string]fileSymbols
+}
+
+func (p *hierarchyPass) fileSymbols(path string) (fileSymbols, error) {
+	if symbols, ok := p.symbols[path]; ok {
+		return symbols, nil
+	}
+	symbols, err := loadFileSymbols(p.db, path)
+	if err != nil {
+		return nil, err
+	}
+	p.symbols[path] = symbols
+	return symbols, nil
+}
+
+// parent stores the supertype item of child as an edge to the indexed type
+// declared at the item's position. A parent outside the indexed project is
+// recorded as external, and one nothing indexed declares there as
+// unresolved; neither becomes an edge. It reports whether an edge was stored.
+func (p *hierarchyPass) parent(child db.Symbol, item lsp.TypeHierarchyItem) (bool, error) {
+	var parent *db.Symbol
+	reason := reasonExternal
+	if path, err := p.root.Path(item.URI); err == nil {
+		symbols, err := p.fileSymbols(path)
+		if err != nil {
+			return false, err
+		}
+		if len(symbols) > 0 {
+			reason = reasonUnresolved
+			line, column := p.lines.FromLSP(p.enc, path, item.SelectionRange.Start)
+			parent = symbols.named(line, column)
+			if parent == nil || !typeKinds[parent.Kind] {
+				parent = symbols.enclosing(line, column, typeKinds)
+			}
+		}
+	}
+
+	// Implementing is a non-interface taking an interface as its parent;
+	// everything else, interfaces extending interfaces included, extends.
+	parentIsInterface := item.Kind == lsp.SymbolKindInterface
+	if parent != nil {
+		parentIsInterface = parent.Kind == "interface"
+	}
+	relationship := "extends"
+	if parentIsInterface && child.Kind != "interface" {
+		relationship = "implements"
+	}
+
+	if parent == nil {
+		return false, p.db.InsertUnresolved(&db.Unresolved{
+			Kind:       relationship,
+			Language:   p.language,
+			FromID:     child.ID,
+			TargetName: item.Name,
+			File:       child.File,
+			Line:       child.Line,
+			Column:     child.Column,
+			Reason:     reason,
+		})
+	}
+	err := p.db.InsertTypeHierarchy(&db.TypeHierarchy{
+		ChildID:      child.ID,
+		ParentID:     parent.ID,
+		Relationship: relationship,
+	})
+	return err == nil, nil
+}
+
 // IndexHierarchyTreeSitter extracts type hierarchy using tree-sitter parsing
 func (h *HierarchyIndexer) IndexHierarchyTreeSitter(ctx context.Context, file FileInfo) (int, error) {
-	lang := h.getLanguage(file.Language)
+	lang := grammar(file.Language)
 	if lang == nil {
 		return 0, nil // Language not supported
 	}
@@ -153,21 +219,39 @@ func (h *HierarchyIndexer) IndexHierarchyTreeSitter(ctx context.Context, file Fi
 	}
 	defer tree.Close()
 
+	// Extractors name both ends; each resolves on evidence, the child usually
+	// to the type declared in this file. Rust names a type declared elsewhere.
 	relationships := h.extractHierarchy(tree.RootNode(), content, file)
+	at := evidence{language: file.Language, file: file.Path}
 
 	count := 0
 	for _, rel := range relationships {
-		// Look up the parent symbol ID by name
-		parentSymbols, err := h.db.GetSymbolByName(rel.ParentID, []string{file.Language})
-		if err != nil || len(parentSymbols) == 0 {
-			// Parent might be in a different language or external - try without language filter
-			parentSymbols, err = h.db.GetSymbolByName(rel.ParentID, nil)
-			if err != nil || len(parentSymbols) == 0 {
-				continue
-			}
+		site := &db.Unresolved{Kind: rel.Relationship, Language: file.Language, File: file.Path}
+		child, err := resolveTarget(h.db, rel.ChildID, typeKinds, at)
+		if err != nil {
+			return count, fmt.Errorf("failed to resolve %s: %w", rel.ChildID, err)
 		}
-		// Use the first matching symbol's ID
-		rel.ParentID = parentSymbols[0].ID
+		if child.symbol == nil {
+			site.TargetName, site.Reason, site.Candidates = rel.ChildID, child.reason, child.candidates
+			if err := h.db.InsertUnresolved(site); err != nil {
+				return count, err
+			}
+			continue
+		}
+		site.FromID, site.Line, site.Column = child.symbol.ID, child.symbol.Line, child.symbol.Column
+
+		parent, err := resolveTarget(h.db, rel.ParentID, typeKinds, at)
+		if err != nil {
+			return count, fmt.Errorf("failed to resolve %s: %w", rel.ParentID, err)
+		}
+		if parent.symbol == nil {
+			site.TargetName, site.Reason, site.Candidates = rel.ParentID, parent.reason, parent.candidates
+			if err := h.db.InsertUnresolved(site); err != nil {
+				return count, err
+			}
+			continue
+		}
+		rel.ChildID, rel.ParentID = child.symbol.ID, parent.symbol.ID
 
 		if err := h.db.InsertTypeHierarchy(rel); err != nil {
 			continue
@@ -176,30 +260,6 @@ func (h *HierarchyIndexer) IndexHierarchyTreeSitter(ctx context.Context, file Fi
 	}
 
 	return count, nil
-}
-
-// getLanguage returns the tree-sitter language for hierarchy parsing
-func (h *HierarchyIndexer) getLanguage(lang string) *sitter.Language {
-	switch lang {
-	case "csharp":
-		return csharp.GetLanguage()
-	case "java":
-		return java.GetLanguage()
-	case "typescript", "typescriptreact", "javascript":
-		return typescript.GetLanguage()
-	case "python":
-		return python.GetLanguage()
-	case "swift":
-		return swift.GetLanguage()
-	case "rust":
-		return rust.GetLanguage()
-	case "go":
-		return golang.GetLanguage()
-	case "ocaml":
-		return ocaml.GetLanguage()
-	default:
-		return nil
-	}
 }
 
 // extractHierarchy walks the AST and extracts type relationships
@@ -232,7 +292,7 @@ func (h *HierarchyIndexer) extractHierarchy(node *sitter.Node, content []byte, f
 func (h *HierarchyIndexer) extractCSharpHierarchy(node *sitter.Node, content []byte, file FileInfo) []*db.TypeHierarchy {
 	var relationships []*db.TypeHierarchy
 
-	h.walkTree(node, func(n *sitter.Node) {
+	walk(node, func(n *sitter.Node) {
 		if n.Type() != "class_declaration" && n.Type() != "struct_declaration" {
 			return
 		}
@@ -255,7 +315,7 @@ func (h *HierarchyIndexer) extractCSharpHierarchy(node *sitter.Node, content []b
 			return
 		}
 
-		childID := fmt.Sprintf("%s#%s", file.RelPath, className)
+		childID := className
 
 		// Extract parent types from base_list
 		if baseList != nil {
@@ -288,7 +348,7 @@ func (h *HierarchyIndexer) extractCSharpHierarchy(node *sitter.Node, content []b
 func (h *HierarchyIndexer) extractJavaHierarchy(node *sitter.Node, content []byte, file FileInfo) []*db.TypeHierarchy {
 	var relationships []*db.TypeHierarchy
 
-	h.walkTree(node, func(n *sitter.Node) {
+	walk(node, func(n *sitter.Node) {
 		if n.Type() != "class_declaration" {
 			return
 		}
@@ -314,7 +374,7 @@ func (h *HierarchyIndexer) extractJavaHierarchy(node *sitter.Node, content []byt
 			return
 		}
 
-		childID := fmt.Sprintf("%s#%s", file.RelPath, className)
+		childID := className
 
 		// Extract superclass
 		if superclass != nil {
@@ -361,7 +421,7 @@ func (h *HierarchyIndexer) extractJavaHierarchy(node *sitter.Node, content []byt
 func (h *HierarchyIndexer) extractTypeScriptHierarchy(node *sitter.Node, content []byte, file FileInfo) []*db.TypeHierarchy {
 	var relationships []*db.TypeHierarchy
 
-	h.walkTree(node, func(n *sitter.Node) {
+	walk(node, func(n *sitter.Node) {
 		if n.Type() != "class_declaration" {
 			return
 		}
@@ -371,7 +431,7 @@ func (h *HierarchyIndexer) extractTypeScriptHierarchy(node *sitter.Node, content
 			return
 		}
 		className := nameNode.Content(content)
-		childID := fmt.Sprintf("%s#%s", file.RelPath, className)
+		childID := className
 
 		// Look for heritage clause (extends/implements)
 		for i := 0; i < int(n.NamedChildCount()); i++ {
@@ -414,7 +474,7 @@ func (h *HierarchyIndexer) extractTypeScriptHierarchy(node *sitter.Node, content
 func (h *HierarchyIndexer) extractPythonHierarchy(node *sitter.Node, content []byte, file FileInfo) []*db.TypeHierarchy {
 	var relationships []*db.TypeHierarchy
 
-	h.walkTree(node, func(n *sitter.Node) {
+	walk(node, func(n *sitter.Node) {
 		if n.Type() != "class_definition" {
 			return
 		}
@@ -424,7 +484,7 @@ func (h *HierarchyIndexer) extractPythonHierarchy(node *sitter.Node, content []b
 			return
 		}
 		className := nameNode.Content(content)
-		childID := fmt.Sprintf("%s#%s", file.RelPath, className)
+		childID := className
 
 		// Look for argument_list (base classes)
 		superclassNode := n.ChildByFieldName("superclasses")
@@ -449,7 +509,7 @@ func (h *HierarchyIndexer) extractPythonHierarchy(node *sitter.Node, content []b
 func (h *HierarchyIndexer) extractSwiftHierarchy(node *sitter.Node, content []byte, file FileInfo) []*db.TypeHierarchy {
 	var relationships []*db.TypeHierarchy
 
-	h.walkTree(node, func(n *sitter.Node) {
+	walk(node, func(n *sitter.Node) {
 		if n.Type() != "class_declaration" && n.Type() != "struct_declaration" {
 			return
 		}
@@ -459,7 +519,7 @@ func (h *HierarchyIndexer) extractSwiftHierarchy(node *sitter.Node, content []by
 			return
 		}
 		className := nameNode.Content(content)
-		childID := fmt.Sprintf("%s#%s", file.RelPath, className)
+		childID := className
 
 		// Look for inheritance clause
 		for i := 0; i < int(n.NamedChildCount()); i++ {
@@ -490,7 +550,7 @@ func (h *HierarchyIndexer) extractSwiftHierarchy(node *sitter.Node, content []by
 func (h *HierarchyIndexer) extractRustHierarchy(node *sitter.Node, content []byte, file FileInfo) []*db.TypeHierarchy {
 	var relationships []*db.TypeHierarchy
 
-	h.walkTree(node, func(n *sitter.Node) {
+	walk(node, func(n *sitter.Node) {
 		if n.Type() != "impl_item" {
 			return
 		}
@@ -502,7 +562,7 @@ func (h *HierarchyIndexer) extractRustHierarchy(node *sitter.Node, content []byt
 		if traitNode != nil && typeNode != nil {
 			traitName := h.getTypeName(traitNode, content)
 			typeName := h.getTypeName(typeNode, content)
-			childID := fmt.Sprintf("%s#%s", file.RelPath, typeName)
+			childID := typeName
 
 			relationships = append(relationships, &db.TypeHierarchy{
 				ChildID:      childID,
@@ -519,7 +579,7 @@ func (h *HierarchyIndexer) extractRustHierarchy(node *sitter.Node, content []byt
 func (h *HierarchyIndexer) extractGoHierarchy(node *sitter.Node, content []byte, file FileInfo) []*db.TypeHierarchy {
 	var relationships []*db.TypeHierarchy
 
-	h.walkTree(node, func(n *sitter.Node) {
+	walk(node, func(n *sitter.Node) {
 		if n.Type() != "type_declaration" {
 			return
 		}
@@ -537,7 +597,7 @@ func (h *HierarchyIndexer) extractGoHierarchy(node *sitter.Node, content []byte,
 			}
 
 			typeName := nameNode.Content(content)
-			childID := fmt.Sprintf("%s#%s", file.RelPath, typeName)
+			childID := typeName
 
 			// Check for struct with embedded types
 			if typeNode.Type() == "struct_type" {
@@ -569,7 +629,7 @@ func (h *HierarchyIndexer) extractGoHierarchy(node *sitter.Node, content []byte,
 func (h *HierarchyIndexer) extractOCamlHierarchy(node *sitter.Node, content []byte, file FileInfo) []*db.TypeHierarchy {
 	var relationships []*db.TypeHierarchy
 
-	h.walkTree(node, func(n *sitter.Node) {
+	walk(node, func(n *sitter.Node) {
 		if n.Type() != "module_definition" {
 			return
 		}
@@ -596,7 +656,7 @@ func (h *HierarchyIndexer) extractOCamlHierarchy(node *sitter.Node, content []by
 			}
 
 			if moduleTypeName != "" && moduleName != "" {
-				childID := fmt.Sprintf("%s#%s", file.RelPath, moduleName)
+				childID := moduleName
 				relationships = append(relationships, &db.TypeHierarchy{
 					ChildID:      childID,
 					ParentID:     moduleTypeName,
@@ -611,13 +671,6 @@ func (h *HierarchyIndexer) extractOCamlHierarchy(node *sitter.Node, content []by
 }
 
 // Helper: walk tree and call callback for each node
-func (h *HierarchyIndexer) walkTree(node *sitter.Node, callback func(*sitter.Node)) {
-	callback(node)
-	for i := 0; i < int(node.NamedChildCount()); i++ {
-		h.walkTree(node.NamedChild(i), callback)
-	}
-}
-
 // Helper: extract type name from various node types
 func (h *HierarchyIndexer) getTypeName(node *sitter.Node, content []byte) string {
 	if node == nil {

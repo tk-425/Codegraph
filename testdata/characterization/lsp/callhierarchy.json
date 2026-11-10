@@ -1,0 +1,299 @@
+{
+  "textDocument/documentSymbol": [
+    {
+      "name": "Runner",
+      "kind": 11,
+      "range": {
+        "start": {
+          "line": 2,
+          "character": 0
+        },
+        "end": {
+          "line": 2,
+          "character": 30
+        }
+      },
+      "selectionRange": {
+        "start": {
+          "line": 2,
+          "character": 5
+        },
+        "end": {
+          "line": 2,
+          "character": 11
+        }
+      },
+      "children": [
+        {
+          "name": "Run",
+          "kind": 6,
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 5
+            },
+            "end": {
+              "line": 2,
+              "character": 10
+            }
+          },
+          "selectionRange": {
+            "start": {
+              "line": 2,
+              "character": 5
+            },
+            "end": {
+              "line": 2,
+              "character": 8
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Job",
+      "kind": 23,
+      "range": {
+        "start": {
+          "line": 4,
+          "character": 0
+        },
+        "end": {
+          "line": 4,
+          "character": 17
+        }
+      },
+      "selectionRange": {
+        "start": {
+          "line": 4,
+          "character": 5
+        },
+        "end": {
+          "line": 4,
+          "character": 8
+        }
+      }
+    },
+    {
+      "name": "(Job).Run",
+      "kind": 6,
+      "range": {
+        "start": {
+          "line": 6,
+          "character": 0
+        },
+        "end": {
+          "line": 6,
+          "character": 19
+        }
+      },
+      "selectionRange": {
+        "start": {
+          "line": 6,
+          "character": 11
+        },
+        "end": {
+          "line": 6,
+          "character": 14
+        }
+      }
+    },
+    {
+      "name": "Dispatch",
+      "kind": 12,
+      "range": {
+        "start": {
+          "line": 8,
+          "character": 0
+        },
+        "end": {
+          "line": 10,
+          "character": 1
+        }
+      },
+      "selectionRange": {
+        "start": {
+          "line": 8,
+          "character": 5
+        },
+        "end": {
+          "line": 8,
+          "character": 13
+        }
+      }
+    }
+  ],
+  "textDocument/references": [],
+  "textDocument/prepareCallHierarchy": [],
+  "textDocument/prepareCallHierarchy@2": [
+    {
+      "name": "Runner.Run",
+      "kind": 6,
+      "uri": "${ROOT_URI}/dispatch.go",
+      "range": {
+        "start": {
+          "line": 2,
+          "character": 0
+        },
+        "end": {
+          "line": 2,
+          "character": 30
+        }
+      },
+      "selectionRange": {
+        "start": {
+          "line": 2,
+          "character": 5
+        },
+        "end": {
+          "line": 2,
+          "character": 8
+        }
+      }
+    }
+  ],
+  "textDocument/prepareCallHierarchy@6": [
+    {
+      "name": "Job.Run",
+      "kind": 6,
+      "uri": "${ROOT_URI}/dispatch.go",
+      "range": {
+        "start": {
+          "line": 6,
+          "character": 0
+        },
+        "end": {
+          "line": 6,
+          "character": 19
+        }
+      },
+      "selectionRange": {
+        "start": {
+          "line": 6,
+          "character": 11
+        },
+        "end": {
+          "line": 6,
+          "character": 14
+        }
+      }
+    }
+  ],
+  "textDocument/prepareCallHierarchy@8": [
+    {
+      "name": "Dispatch",
+      "kind": 6,
+      "uri": "${ROOT_URI}/dispatch.go",
+      "range": {
+        "start": {
+          "line": 8,
+          "character": 0
+        },
+        "end": {
+          "line": 10,
+          "character": 1
+        }
+      },
+      "selectionRange": {
+        "start": {
+          "line": 8,
+          "character": 5
+        },
+        "end": {
+          "line": 8,
+          "character": 13
+        }
+      }
+    }
+  ],
+  "callHierarchy/incomingCalls": [],
+  "callHierarchy/incomingCalls@Runner.Run": [
+    {
+      "from": {
+        "name": "Dispatch",
+        "kind": 6,
+        "uri": "${ROOT_URI}/dispatch.go",
+        "range": {
+          "start": {
+            "line": 8,
+            "character": 0
+          },
+          "end": {
+            "line": 10,
+            "character": 1
+          }
+        },
+        "selectionRange": {
+          "start": {
+            "line": 8,
+            "character": 5
+          },
+          "end": {
+            "line": 8,
+            "character": 13
+          }
+        }
+      },
+      "fromRanges": [
+        {
+          "start": {
+            "line": 9,
+            "character": 3
+          },
+          "end": {
+            "line": 9,
+            "character": 6
+          }
+        }
+      ]
+    }
+  ],
+  "callHierarchy/incomingCalls@Job.Run": [
+    {
+      "from": {
+        "name": "Dispatch",
+        "kind": 6,
+        "uri": "${ROOT_URI}/dispatch.go",
+        "range": {
+          "start": {
+            "line": 8,
+            "character": 0
+          },
+          "end": {
+            "line": 10,
+            "character": 1
+          }
+        },
+        "selectionRange": {
+          "start": {
+            "line": 8,
+            "character": 5
+          },
+          "end": {
+            "line": 8,
+            "character": 13
+          }
+        }
+      },
+      "fromRanges": [
+        {
+          "start": {
+            "line": 9,
+            "character": 3
+          },
+          "end": {
+            "line": 9,
+            "character": 6
+          }
+        }
+      ]
+    }
+  ],
+  "initialize": {
+    "capabilities": {
+      "documentSymbolProvider": true,
+      "referencesProvider": true,
+      "callHierarchyProvider": true
+    }
+  }
+}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -90,7 +89,7 @@ func waitForServerSettle(ctx context.Context, language string) error {
 // NewIndexer creates a new indexer
 func NewIndexer(cfg *config.Config, dbManager *db.Manager, rootPath string) *Indexer {
 	absPath, _ := filepath.Abs(rootPath)
-	rootURI := "file://" + absPath
+	rootURI := lsp.NewRoot(absPath).URI()
 
 	return &Indexer{
 		cfg:         cfg,
@@ -292,8 +291,12 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 		}
 	}
 
-	fmt.Fprintf(i.progress, "✅ Indexed %d files, skipped %d unchanged, %d symbols, %d calls, %d type relations\n",
-		indexedFiles, skippedFiles, totalSymbols, totalCalls, totalHierarchy)
+	unresolved, err := i.db.GetUnresolved()
+	if err != nil {
+		return fmt.Errorf("failed to count unresolved relationships: %w", err)
+	}
+	fmt.Fprintf(i.progress, "✅ Indexed %d files, skipped %d unchanged, %d symbols, %d calls, %d type relations, %d unresolved sites\n",
+		indexedFiles, skippedFiles, totalSymbols, totalCalls, totalHierarchy, len(unresolved))
 	return nil
 }
 
@@ -329,7 +332,7 @@ func (i *Indexer) shouldSkipFile(file FileInfo) (bool, error) {
 // indexFile indexes a single file and returns number of symbols stored
 func (i *Indexer) indexFile(ctx context.Context, client *lsp.Client, file FileInfo) (int, error) {
 	// Convert path to URI
-	fileURI := pathToURI(file.Path)
+	fileURI := lsp.PathToURI(file.Path)
 
 	// Read file content
 	content, err := os.ReadFile(file.Path)
@@ -351,10 +354,13 @@ func (i *Indexer) indexFile(ctx context.Context, client *lsp.Client, file FileIn
 	}
 
 	// Store symbols in database
-	count := 0
-	if err := i.storeSymbols(file, symbols, "", &count); err != nil {
+	lines := lsp.NewSourceLines()
+	lines.Set(file.Path, contentStr)
+	doc := &lspDocument{file: file, enc: client.PositionEncoding(), lines: lines, ids: idAllocator{}}
+	if err := i.storeSymbols(doc, symbols, nil); err != nil {
 		return 0, err
 	}
+	count := doc.count
 
 	// Update file metadata
 	if err := i.db.UpdateFileMeta(file.Path, time.Now(), file.Language); err != nil {
@@ -364,26 +370,40 @@ func (i *Indexer) indexFile(ctx context.Context, client *lsp.Client, file FileIn
 	return count, nil
 }
 
+// lspDocument is one file's document symbols being stored.
+type lspDocument struct {
+	file  FileInfo
+	enc   lsp.PositionEncoding
+	lines *lsp.SourceLines
+	ids   idAllocator
+	count int
+}
+
 // storeSymbols recursively stores symbols in the database
-func (i *Indexer) storeSymbols(file FileInfo, symbols []lsp.DocumentSymbol, scope string, count *int) error {
+func (i *Indexer) storeSymbols(doc *lspDocument, symbols []lsp.DocumentSymbol, owners []string) error {
+	file := doc.file
 	for _, sym := range symbols {
-		// Create symbol ID
-		id := fmt.Sprintf("%s#%s", file.RelPath, sym.Name)
-		if scope != "" {
-			id = fmt.Sprintf("%s#%s.%s", file.RelPath, scope, sym.Name)
+		key := symbolKey{Language: file.Language, RelPath: file.RelPath, Owners: owners, Name: sym.Name}
+		if file.Language == "go" {
+			if receiver, method, ok := splitGoReceiver(sym.Name); ok {
+				key.Owners = append(append([]string(nil), owners...), receiver)
+				key.Name = method
+			}
 		}
+		line, column := doc.lines.FromLSP(doc.enc, file.Path, sym.SelectionRange.Start)
+		endLine, endColumn := doc.lines.FromLSP(doc.enc, file.Path, sym.Range.End)
 
 		// Create database symbol
 		dbSym := &db.Symbol{
-			ID:            id,
-			Name:          sym.Name,
+			ID:            doc.ids.assign(key),
+			Name:          key.Name,
 			Kind:          lsp.SymbolKindToString(sym.Kind),
 			File:          file.Path,
-			Line:          sym.SelectionRange.Start.Line + 1, // LSP is 0-indexed
-			Column:        sym.SelectionRange.Start.Character,
-			EndLine:       intPtr(sym.Range.End.Line + 1),
-			EndColumn:     intPtr(sym.Range.End.Character),
-			Scope:         scope,
+			Line:          line,
+			Column:        column,
+			EndLine:       intPtr(endLine),
+			EndColumn:     intPtr(endColumn),
+			Scope:         key.Scope(),
 			Signature:     extractReturnType(sym.Detail, file.Language),
 			Documentation: "",
 			Language:      file.Language,
@@ -394,15 +414,12 @@ func (i *Indexer) storeSymbols(file FileInfo, symbols []lsp.DocumentSymbol, scop
 		if err := i.db.InsertSymbol(dbSym); err != nil {
 			return err
 		}
-		*count++
+		doc.count++
 
 		// Recursively process children
 		if len(sym.Children) > 0 {
-			childScope := sym.Name
-			if scope != "" {
-				childScope = scope + "." + sym.Name
-			}
-			if err := i.storeSymbols(file, sym.Children, childScope, count); err != nil {
+			childOwners := append(append([]string(nil), key.Owners...), key.Name)
+			if err := i.storeSymbols(doc, sym.Children, childOwners); err != nil {
 				return err
 			}
 		}
@@ -417,15 +434,6 @@ func (i *Indexer) Close() error {
 }
 
 // Helper functions
-
-func pathToURI(path string) string {
-	absPath, _ := filepath.Abs(path)
-	u := url.URL{
-		Scheme: "file",
-		Path:   absPath,
-	}
-	return u.String()
-}
 
 func intPtr(i int) *int {
 	return &i
