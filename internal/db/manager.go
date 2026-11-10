@@ -212,7 +212,7 @@ func (m *Manager) InsertSymbol(s *Symbol) error {
 // InsertCall inserts a call relationship
 func (m *Manager) InsertCall(c *Call) error {
 	_, err := m.db.Exec(`
-		INSERT INTO calls (caller_id, callee_id, file, line, column)
+		INSERT OR IGNORE INTO calls (caller_id, callee_id, file, line, column)
 		VALUES (?, ?, ?, ?, ?)`,
 		c.CallerID, c.CalleeID, c.File, c.Line, c.Column,
 	)
@@ -278,17 +278,27 @@ func (m *Manager) GetImplementations(parentID string) ([]Symbol, error) {
 	return scanSymbols(rows)
 }
 
-// GetImplementationsByName returns symbols that implement/extend a type by its name
-func (m *Manager) GetImplementationsByName(typeName string) ([]Symbol, error) {
+// GetImplementationsByName returns symbols that implement or extend a type
+// by its name, optionally limited to languages. Embedding is not
+// implementation, so embeds relationships are excluded.
+func (m *Manager) GetImplementationsByName(typeName string, languages []string) ([]Symbol, error) {
 	query := `
 		SELECT ` + symbolColumns("s") + `
 		FROM symbols s
 		INNER JOIN type_hierarchy th ON s.id = th.child_id
 		INNER JOIN symbols parent ON th.parent_id = parent.id
-		WHERE parent.name = ?
-		ORDER BY s.file, s.line`
+		WHERE parent.name = ? AND th.relationship IN ('implements', 'extends')`
+	args := []interface{}{typeName}
 
-	rows, err := m.db.Query(query, typeName)
+	if len(languages) > 0 {
+		query += " AND s.language IN (?" + repeatString(",?", len(languages)-1) + ")"
+		for _, lang := range languages {
+			args = append(args, lang)
+		}
+	}
+	query += " ORDER BY s.file, s.line"
+
+	rows, err := m.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -354,8 +364,9 @@ func (m *Manager) GetCallers(symbolName string, languages []string) ([]CallerInf
 		}
 	}
 
-	// Group by call site to avoid duplicates when multiple callees match (e.g., interface + impl)
-	query += " GROUP BY c.file, c.line, c.column ORDER BY c.file, c.line"
+	// One row per call site and caller: a site calling two matching callees
+	// (an interface method and its implementation) names its caller once.
+	query += " GROUP BY c.file, c.line, c.column, s.id ORDER BY c.file, c.line, c.column"
 
 	rows, err := m.db.Query(query, args...)
 	if err != nil {
@@ -400,8 +411,9 @@ func (m *Manager) GetCallees(symbolName string, languages []string) ([]CalleeInf
 		}
 	}
 
-	// Group by call site to deduplicate (interface + impl at same line)
-	query += " GROUP BY c.file, c.line, c.column ORDER BY c.file, c.line"
+	// One row per call site and callee: distinct targets at one site stay
+	// distinct, and a caller matched twice does not repeat them.
+	query += " GROUP BY c.file, c.line, c.column, s.id ORDER BY c.file, c.line, c.column"
 
 	rows, err := m.db.Query(query, args...)
 	if err != nil {

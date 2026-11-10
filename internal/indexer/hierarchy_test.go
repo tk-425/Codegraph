@@ -39,7 +39,7 @@ func TestExternalHierarchyParentIsRecordedNotStored(t *testing.T) {
 	if count != 0 {
 		t.Fatalf("hierarchy pass stored %d relationships, want 0", count)
 	}
-	if children, err := database.GetImplementationsByName("Protocol"); err != nil || len(children) != 0 {
+	if children, err := database.GetImplementationsByName("Protocol", nil); err != nil || len(children) != 0 {
 		t.Fatalf("external parent has stored children %+v (err %v)", children, err)
 	}
 	sites := unresolvedNamed(t, database, "Protocol")

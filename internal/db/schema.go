@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS calls (
     file TEXT NOT NULL,
     line INTEGER NOT NULL,
     column INTEGER NOT NULL,
+    UNIQUE(caller_id, callee_id, file, line, column),
     FOREIGN KEY(caller_id) REFERENCES symbols(id),
     FOREIGN KEY(callee_id) REFERENCES symbols(id)
 );`
