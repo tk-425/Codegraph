@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/tk-425/Codegraph/internal/config"
@@ -128,6 +130,41 @@ func TestLegacyIndexFormatRequiresExplicitRebuild(t *testing.T) {
 	}
 	if human := runCLI(t, root, "callers", "Target"); human.exit == 0 || !bytes.Contains(human.stderr, []byte("build --force")) {
 		t.Errorf("human query on legacy index: exit=%d stderr=%s", human.exit, human.stderr)
+	}
+
+	// Health is diagnostic: it exits 0 but must not call this database healthy.
+	health := runCLI(t, root, "health", "--json")
+	if health.exit != 0 {
+		t.Errorf("health exit=%d, want 0", health.exit)
+	}
+	databaseOK, sawDatabase := false, false
+	for _, raw := range requireOneEnvelope(t, health).Results {
+		var record struct {
+			Category string `json:"category"`
+			OK       bool   `json:"ok"`
+			Detail   string `json:"detail"`
+		}
+		if err := json.Unmarshal(raw, &record); err != nil {
+			t.Fatal(err)
+		}
+		switch record.Category {
+		case "database":
+			databaseOK, sawDatabase = record.OK, true
+			if !strings.Contains(record.Detail, "build --force") {
+				t.Errorf("health database detail=%q, want build --force guidance", record.Detail)
+			}
+		case "stats":
+			t.Errorf("health reported stats from a legacy index: %s", raw)
+		}
+	}
+	if !sawDatabase || databaseOK {
+		t.Errorf("health database record present=%v ok=%v, want ok=false; stdout=%s", sawDatabase, databaseOK, health.stdout)
+	}
+	if human := runCLI(t, root, "health"); human.exit != 0 || bytes.Contains(human.stdout, []byte("accessible")) || !bytes.Contains(human.stdout, []byte("build --force")) {
+		t.Errorf("human health on legacy index: exit=%d stdout=%s", human.exit, human.stdout)
+	}
+	if fileDigest(t, dbPath) != legacy {
+		t.Fatal("health modified the legacy database")
 	}
 
 	requireBuild(t, root, "--force")
