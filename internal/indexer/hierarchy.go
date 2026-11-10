@@ -52,6 +52,14 @@ func (h *HierarchyIndexer) IndexHierarchyLSP(ctx context.Context, language strin
 	openedFiles := make(map[string]bool)
 	lines := lsp.NewSourceLines()
 	enc := client.PositionEncoding()
+	pass := &hierarchyPass{
+		db:       h.db,
+		language: language,
+		root:     lsp.NewRoot(h.rootPath),
+		lines:    lines,
+		enc:      enc,
+		symbols:  map[string]fileSymbols{},
+	}
 
 	for _, sym := range symbols {
 		fileURI := lsp.PathToURI(sym.File)
@@ -97,21 +105,13 @@ func (h *HierarchyIndexer) IndexHierarchyLSP(ctx context.Context, language strin
 		}
 
 		for _, parent := range supertypes {
-			relationship := "extends"
-			if sym.Kind == "class" && parent.Kind == lsp.SymbolKindInterface {
-				relationship = "implements"
+			stored, err := pass.parent(sym, parent)
+			if err != nil {
+				return count, err
 			}
-
-			th := &db.TypeHierarchy{
-				ChildID:      sym.ID,
-				ParentID:     parent.Name, // Will be resolved to ID later
-				Relationship: relationship,
+			if stored {
+				count++
 			}
-
-			if err := h.db.InsertTypeHierarchy(th); err != nil {
-				continue
-			}
-			count++
 		}
 	}
 
@@ -121,6 +121,81 @@ func (h *HierarchyIndexer) IndexHierarchyLSP(ctx context.Context, language strin
 	}
 
 	return count, nil
+}
+
+// hierarchyPass holds what one hierarchy pass learns about each file.
+type hierarchyPass struct {
+	db       *db.Manager
+	language string
+	root     lsp.Root
+	lines    *lsp.SourceLines
+	enc      lsp.PositionEncoding
+	symbols  map[string]fileSymbols
+}
+
+func (p *hierarchyPass) fileSymbols(path string) (fileSymbols, error) {
+	if symbols, ok := p.symbols[path]; ok {
+		return symbols, nil
+	}
+	symbols, err := loadFileSymbols(p.db, path)
+	if err != nil {
+		return nil, err
+	}
+	p.symbols[path] = symbols
+	return symbols, nil
+}
+
+// parent stores the supertype item of child as an edge to the indexed type
+// declared at the item's position. A parent outside the indexed project is
+// recorded as external, and one nothing indexed declares there as
+// unresolved; neither becomes an edge. It reports whether an edge was stored.
+func (p *hierarchyPass) parent(child db.Symbol, item lsp.TypeHierarchyItem) (bool, error) {
+	var parent *db.Symbol
+	reason := reasonExternal
+	if path, err := p.root.Path(item.URI); err == nil {
+		symbols, err := p.fileSymbols(path)
+		if err != nil {
+			return false, err
+		}
+		if len(symbols) > 0 {
+			reason = reasonUnresolved
+			line, column := p.lines.FromLSP(p.enc, path, item.SelectionRange.Start)
+			parent = symbols.named(line, column)
+			if parent == nil || !typeKinds[parent.Kind] {
+				parent = symbols.enclosing(line, column, typeKinds)
+			}
+		}
+	}
+
+	// Implementing is a non-interface taking an interface as its parent;
+	// everything else, interfaces extending interfaces included, extends.
+	parentIsInterface := item.Kind == lsp.SymbolKindInterface
+	if parent != nil {
+		parentIsInterface = parent.Kind == "interface"
+	}
+	relationship := "extends"
+	if parentIsInterface && child.Kind != "interface" {
+		relationship = "implements"
+	}
+
+	if parent == nil {
+		return false, p.db.InsertUnresolved(&db.Unresolved{
+			Kind:       relationship,
+			Language:   p.language,
+			FromID:     child.ID,
+			TargetName: item.Name,
+			File:       child.File,
+			Line:       child.Line,
+			Column:     child.Column,
+			Reason:     reason,
+		})
+	}
+	err := p.db.InsertTypeHierarchy(&db.TypeHierarchy{
+		ChildID:      child.ID,
+		ParentID:     parent.ID,
+		Relationship: relationship,
+	})
+	return err == nil, nil
 }
 
 // IndexHierarchyTreeSitter extracts type hierarchy using tree-sitter parsing
