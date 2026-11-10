@@ -11,8 +11,15 @@ type InitializeParams struct {
 
 // ClientCapabilities describes client capabilities
 type ClientCapabilities struct {
+	General      GeneralClientCapabilities      `json:"general,omitempty"`
 	TextDocument TextDocumentClientCapabilities `json:"textDocument,omitempty"`
 	Workspace    WorkspaceClientCapabilities    `json:"workspace,omitempty"`
+}
+
+// GeneralClientCapabilities for general features
+type GeneralClientCapabilities struct {
+	// PositionEncodings lists encodings in decreasing preference (LSP 3.17).
+	PositionEncodings []PositionEncoding `json:"positionEncodings,omitempty"`
 }
 
 // TextDocumentClientCapabilities for text document features
@@ -56,14 +63,30 @@ type InitializeResult struct {
 // Note: Many fields use `any` because LSP servers can return either
 // a boolean (true/false) or an options object for each capability
 type ServerCapabilities struct {
-	TextDocumentSync           any `json:"textDocumentSync,omitempty"`
-	DocumentSymbolProvider     any `json:"documentSymbolProvider,omitempty"`
-	WorkspaceSymbolProvider    any `json:"workspaceSymbolProvider,omitempty"`
-	DefinitionProvider         any `json:"definitionProvider,omitempty"`
-	ReferencesProvider         any `json:"referencesProvider,omitempty"`
-	ImplementationProvider     any `json:"implementationProvider,omitempty"`
-	CallHierarchyProvider      any `json:"callHierarchyProvider,omitempty"`
-	TypeHierarchyProvider      any `json:"typeHierarchyProvider,omitempty"`
+	TextDocumentSync        any `json:"textDocumentSync,omitempty"`
+	DocumentSymbolProvider  any `json:"documentSymbolProvider,omitempty"`
+	WorkspaceSymbolProvider any `json:"workspaceSymbolProvider,omitempty"`
+	DefinitionProvider      any `json:"definitionProvider,omitempty"`
+	ReferencesProvider      any `json:"referencesProvider,omitempty"`
+	ImplementationProvider  any `json:"implementationProvider,omitempty"`
+	CallHierarchyProvider   any `json:"callHierarchyProvider,omitempty"`
+	TypeHierarchyProvider   any `json:"typeHierarchyProvider,omitempty"`
+	// PositionEncoding is the server's pick from the client's offer; empty
+	// means UTF-16.
+	PositionEncoding string `json:"positionEncoding,omitempty"`
+}
+
+// Supports reports whether a capability value advertises a provider: true or
+// an options object. Absent, null and false do not.
+func Supports(capability any) bool {
+	switch v := capability.(type) {
+	case nil:
+		return false
+	case bool:
+		return v
+	default:
+		return true
+	}
 }
 
 // DocumentSymbolParams for textDocument/documentSymbol request
@@ -117,6 +140,9 @@ type ImplementationParams struct {
 // DefaultClientCapabilities returns capabilities we advertise to servers
 func DefaultClientCapabilities() ClientCapabilities {
 	return ClientCapabilities{
+		General: GeneralClientCapabilities{
+			PositionEncodings: []PositionEncoding{EncodingUTF8, EncodingUTF16},
+		},
 		TextDocument: TextDocumentClientCapabilities{
 			DocumentSymbol: DocumentSymbolClientCapabilities{
 				HierarchicalDocumentSymbolSupport: true,

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -122,6 +123,21 @@ func runBuild(cmd *cobra.Command, args []string) error {
 		return withCode("db_open_failed", fmt.Errorf("failed to open database: %w", err))
 	}
 	defer dbManager.Close()
+
+	// A graph in another index format is never extended: only an explicitly
+	// requested rebuild replaces it (D06).
+	if err := dbManager.CheckFormat(); err != nil {
+		var incompatible *db.IncompatibleFormatError
+		if !errors.As(err, &incompatible) {
+			return withCode("database_init_failed", err)
+		}
+		if !forceFlag {
+			return withCode("index_format_incompatible", err)
+		}
+		if err := dbManager.ResetFormat(); err != nil {
+			return withCode("database_init_failed", fmt.Errorf("failed to reset index format: %w", err))
+		}
+	}
 
 	if err := dbManager.Initialize(); err != nil {
 		return withCode("database_init_failed", fmt.Errorf("failed to initialize database: %w", err))

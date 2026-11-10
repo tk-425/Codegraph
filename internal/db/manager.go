@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -25,18 +26,28 @@ func NewManager(dbPath string) (*Manager, error) {
 		return nil, fmt.Errorf("failed to create database directory: %w", err)
 	}
 
-	db, err := sql.Open("sqlite3", dbPath)
+	absPath, err := filepath.Abs(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
-
-	// Enable foreign keys
-	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
+	// Foreign keys are a per-connection setting, so the DSN carries it to
+	// every pooled connection.
+	db, err := sql.Open("sqlite3", fileDSN(absPath, "_foreign_keys=on"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database: %w", err)
+	}
+	if err := db.Ping(); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("failed to enable foreign keys: %w", err)
+		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
 	return &Manager{db: db, dbPath: dbPath}, nil
+}
+
+// fileDSN is a go-sqlite3 URI DSN for an absolute path. The path is
+// percent-encoded, so '?', '#' and spaces in directory names stay part of it.
+func fileDSN(absPath, query string) string {
+	return (&url.URL{Scheme: "file", Path: absPath, RawQuery: query}).String()
 }
 
 // OpenReadOnly opens an existing database for queries. It never creates the
@@ -50,8 +61,7 @@ func OpenReadOnly(dbPath string) (*Manager, error) {
 	if _, err := os.Stat(absPath); err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
-	dsn := (&url.URL{Scheme: "file", Path: absPath, RawQuery: "mode=ro"}).String()
-	db, err := sql.Open("sqlite3", dsn)
+	db, err := sql.Open("sqlite3", fileDSN(absPath, "mode=ro"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -62,14 +72,80 @@ func OpenReadOnly(dbPath string) (*Manager, error) {
 	return &Manager{db: db, dbPath: dbPath}, nil
 }
 
-// Initialize creates all tables and indexes
+// Initialize creates all tables and indexes. A database created here is
+// stamped with the current FormatVersion.
 func (m *Manager) Initialize() error {
+	var existing int
+	if err := m.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'symbols'`).Scan(&existing); err != nil {
+		return fmt.Errorf("failed to inspect schema: %w", err)
+	}
 	for _, stmt := range AllSchemaStatements() {
 		if _, err := m.db.Exec(stmt); err != nil {
 			return fmt.Errorf("failed to execute schema statement: %w", err)
 		}
 	}
+	if existing == 0 {
+		if _, err := m.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", FormatVersion)); err != nil {
+			return fmt.Errorf("failed to stamp format version: %w", err)
+		}
+	}
 	return nil
+}
+
+// IncompatibleFormatError reports a database whose graph was written in
+// another index format. Its identities cannot be read with current rules.
+type IncompatibleFormatError struct {
+	Found int
+}
+
+func (e *IncompatibleFormatError) Error() string {
+	return fmt.Sprintf("index format %d is incompatible with this version (format %d); run 'codegraph build --force' to rebuild", e.Found, FormatVersion)
+}
+
+// CheckFormat returns *IncompatibleFormatError when the database holds a
+// graph in another index format. A database without graph tables is
+// compatible. It never writes.
+func (m *Manager) CheckFormat() error {
+	var tables int
+	if err := m.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'symbols'`).Scan(&tables); err != nil {
+		return fmt.Errorf("failed to inspect schema: %w", err)
+	}
+	if tables == 0 {
+		return nil
+	}
+	var version int
+	if err := m.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		return fmt.Errorf("failed to read format version: %w", err)
+	}
+	if version != FormatVersion {
+		return &IncompatibleFormatError{Found: version}
+	}
+	return nil
+}
+
+// ResetFormat drops the graph tables and recreates them in the current
+// format, in one transaction: on failure the previous database is unchanged.
+// Only an explicitly requested rebuild calls it; the graph data is discarded.
+func (m *Manager) ResetFormat() error {
+	tx, err := m.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin format reset: %w", err)
+	}
+	defer tx.Rollback()
+	for _, table := range graphTables {
+		if _, err := tx.Exec("DROP TABLE IF EXISTS " + table); err != nil {
+			return fmt.Errorf("failed to drop %s: %w", table, err)
+		}
+	}
+	for _, stmt := range AllSchemaStatements() {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("failed to execute schema statement: %w", err)
+		}
+	}
+	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", FormatVersion)); err != nil {
+		return fmt.Errorf("failed to stamp format version: %w", err)
+	}
+	return tx.Commit()
 }
 
 // Close closes the database connection
@@ -79,8 +155,7 @@ func (m *Manager) Close() error {
 
 // ClearAll deletes all data (for full rebuild)
 func (m *Manager) ClearAll() error {
-	tables := []string{"calls", "type_hierarchy", "symbols", "file_meta"}
-	for _, table := range tables {
+	for _, table := range graphTables {
 		if _, err := m.db.Exec(fmt.Sprintf("DELETE FROM %s", table)); err != nil {
 			return fmt.Errorf("failed to clear %s: %w", table, err)
 		}
@@ -99,6 +174,9 @@ func (m *Manager) ClearCalls(language string) error {
 	if _, err := m.db.Exec(query, language); err != nil {
 		return fmt.Errorf("failed to clear calls for %s: %w", language, err)
 	}
+	if _, err := m.db.Exec(`DELETE FROM unresolved_relationships WHERE kind = 'call' AND language = ?`, language); err != nil {
+		return fmt.Errorf("failed to clear unresolved calls for %s: %w", language, err)
+	}
 	return nil
 }
 
@@ -113,17 +191,20 @@ func (m *Manager) ClearTypeHierarchy(language string) error {
 	if _, err := m.db.Exec(query, language); err != nil {
 		return fmt.Errorf("failed to clear type hierarchy for %s: %w", language, err)
 	}
+	if _, err := m.db.Exec(`DELETE FROM unresolved_relationships WHERE kind != 'call' AND language = ?`, language); err != nil {
+		return fmt.Errorf("failed to clear unresolved type relationships for %s: %w", language, err)
+	}
 	return nil
 }
 
 // InsertSymbol inserts a symbol into the database
 func (m *Manager) InsertSymbol(s *Symbol) error {
 	_, err := m.db.Exec(`
-		INSERT OR REPLACE INTO symbols 
-		(id, name, kind, file, line, column, end_line, end_column, scope, signature, documentation, language, source, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		s.ID, s.Name, s.Kind, s.File, s.Line, s.Column, s.EndLine, s.EndColumn,
-		s.Scope, s.Signature, s.Documentation, s.Language, s.Source, s.CreatedAt,
+		INSERT OR REPLACE INTO symbols (`+symbolColumns("")+`)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		s.ID, s.Name, s.Kind, s.File, s.Line, s.Column, s.StartLine, s.StartColumn,
+		s.EndLine, s.EndColumn, s.Scope, s.Signature, s.Documentation, s.Language,
+		s.Source, s.CreatedAt,
 	)
 	return err
 }
@@ -131,7 +212,7 @@ func (m *Manager) InsertSymbol(s *Symbol) error {
 // InsertCall inserts a call relationship
 func (m *Manager) InsertCall(c *Call) error {
 	_, err := m.db.Exec(`
-		INSERT INTO calls (caller_id, callee_id, file, line, column)
+		INSERT OR IGNORE INTO calls (caller_id, callee_id, file, line, column)
 		VALUES (?, ?, ?, ?, ?)`,
 		c.CallerID, c.CalleeID, c.File, c.Line, c.Column,
 	)
@@ -148,11 +229,41 @@ func (m *Manager) InsertTypeHierarchy(th *TypeHierarchy) error {
 	return err
 }
 
+// InsertUnresolved records an unresolved relationship site once.
+func (m *Manager) InsertUnresolved(u *Unresolved) error {
+	_, err := m.db.Exec(`
+		INSERT OR IGNORE INTO unresolved_relationships
+		(kind, language, from_id, target_name, file, line, column, reason, candidates)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		u.Kind, u.Language, u.FromID, u.TargetName, u.File, u.Line, u.Column, u.Reason, u.Candidates,
+	)
+	return err
+}
+
+// GetUnresolved returns every recorded unresolved relationship site.
+func (m *Manager) GetUnresolved() ([]Unresolved, error) {
+	rows, err := m.db.Query(`
+		SELECT kind, language, from_id, target_name, file, line, column, reason, candidates
+		FROM unresolved_relationships ORDER BY file, line, column`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var found []Unresolved
+	for rows.Next() {
+		var u Unresolved
+		if err := rows.Scan(&u.Kind, &u.Language, &u.FromID, &u.TargetName, &u.File, &u.Line, &u.Column, &u.Reason, &u.Candidates); err != nil {
+			return nil, err
+		}
+		found = append(found, u)
+	}
+	return found, rows.Err()
+}
+
 // GetImplementations returns symbols that implement/extend the given parent symbol
 func (m *Manager) GetImplementations(parentID string) ([]Symbol, error) {
 	query := `
-		SELECT s.id, s.name, s.kind, s.file, s.line, s.column, s.end_line, s.end_column, 
-			   s.scope, s.signature, s.documentation, s.language, s.source, s.created_at
+		SELECT ` + symbolColumns("s") + `
 		FROM symbols s
 		INNER JOIN type_hierarchy th ON s.id = th.child_id
 		WHERE th.parent_id = ?
@@ -167,18 +278,27 @@ func (m *Manager) GetImplementations(parentID string) ([]Symbol, error) {
 	return scanSymbols(rows)
 }
 
-// GetImplementationsByName returns symbols that implement/extend a type by its name
-func (m *Manager) GetImplementationsByName(typeName string) ([]Symbol, error) {
+// GetImplementationsByName returns symbols that implement or extend a type
+// by its name, optionally limited to languages. Embedding is not
+// implementation, so embeds relationships are excluded.
+func (m *Manager) GetImplementationsByName(typeName string, languages []string) ([]Symbol, error) {
 	query := `
-		SELECT s.id, s.name, s.kind, s.file, s.line, s.column, s.end_line, s.end_column, 
-			   s.scope, s.signature, s.documentation, s.language, s.source, s.created_at
+		SELECT ` + symbolColumns("s") + `
 		FROM symbols s
 		INNER JOIN type_hierarchy th ON s.id = th.child_id
 		INNER JOIN symbols parent ON th.parent_id = parent.id
-		WHERE parent.name = ?
-		ORDER BY s.file, s.line`
+		WHERE parent.name = ? AND th.relationship IN ('implements', 'extends')`
+	args := []interface{}{typeName}
 
-	rows, err := m.db.Query(query, typeName)
+	if len(languages) > 0 {
+		query += " AND s.language IN (?" + repeatString(",?", len(languages)-1) + ")"
+		for _, lang := range languages {
+			args = append(args, lang)
+		}
+	}
+	query += " ORDER BY s.file, s.line"
+
+	rows, err := m.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +309,7 @@ func (m *Manager) GetImplementationsByName(typeName string) ([]Symbol, error) {
 
 // SearchSymbols searches for symbols by name with optional filters
 func (m *Manager) SearchSymbols(name string, kind string, languages []string) ([]Symbol, error) {
-	query := "SELECT id, name, kind, file, line, column, end_line, end_column, scope, signature, documentation, language, source, created_at FROM symbols WHERE name LIKE ?"
+	query := "SELECT " + symbolColumns("") + " FROM symbols WHERE name LIKE ?"
 	args := []interface{}{"%" + name + "%"}
 
 	if kind != "" {
@@ -220,24 +340,21 @@ func (m *Manager) SearchSymbols(name string, kind string, languages []string) ([
 
 // GetCallers finds all callers of a symbol with call site info
 func (m *Manager) GetCallers(symbolName string, languages []string) ([]CallerInfo, error) {
-	// Join calls table to find caller symbols
-	// callee_id format varies:
-	// - Go: path#FunctionName
-	// - Java: path#Class.methodName(params)
-	// - C#: path#ClassName.MethodName
-	// We need to match when symbolName appears after # or after . (for method names)
+	// Match the callee symbol's name, never its ID encoding:
+	// - Exact match: main
+	// - Method with params: main(String[])
+	// - Qualified: Class.main(
 	query := `
-		SELECT s.id, s.name, s.kind, s.file, s.line, s.column, s.end_line, s.end_column, 
-		       s.scope, s.signature, s.documentation, s.language, s.source, s.created_at,
+		SELECT ` + symbolColumns("s") + `,
 		       c.file as call_file, c.line as call_line, c.column as call_column
 		FROM symbols s
 		JOIN calls c ON s.id = c.caller_id
-		WHERE (c.callee_id LIKE ? OR c.callee_id LIKE ? OR c.callee_id LIKE ?)`
-	// Match: #symbolName, #Class.symbolName, or .symbolName(
+		JOIN symbols callee ON c.callee_id = callee.id
+		WHERE (callee.name = ? OR callee.name LIKE ? OR callee.name LIKE ?)`
 	args := []interface{}{
-		"%#" + symbolName,          // Exact function: path#FunctionName
-		"%#%." + symbolName + "(%", // Method with params: path#Class.method(
-		"%." + symbolName,          // Method without params: path#Class.method
+		symbolName,               // Exact match
+		symbolName + "(%",        // Method with params: main(
+		"%." + symbolName + "(%", // Qualified with params: Class.main(
 	}
 
 	if len(languages) > 0 {
@@ -247,8 +364,9 @@ func (m *Manager) GetCallers(symbolName string, languages []string) ([]CallerInf
 		}
 	}
 
-	// Group by call site to avoid duplicates when multiple callees match (e.g., interface + impl)
-	query += " GROUP BY c.file, c.line, c.column ORDER BY c.file, c.line"
+	// One row per call site and caller: a site calling two matching callees
+	// (an interface method and its implementation) names its caller once.
+	query += " GROUP BY c.file, c.line, c.column, s.id ORDER BY c.file, c.line, c.column"
 
 	rows, err := m.db.Query(query, args...)
 	if err != nil {
@@ -259,18 +377,9 @@ func (m *Manager) GetCallers(symbolName string, languages []string) ([]CallerInf
 	var callers []CallerInfo
 	for rows.Next() {
 		var c CallerInfo
-		var endLine, endColumn *int
-		err := rows.Scan(
-			&c.ID, &c.Name, &c.Kind, &c.File, &c.Line, &c.Column,
-			&endLine, &endColumn, &c.Scope, &c.Signature, &c.Documentation,
-			&c.Language, &c.Source, &c.CreatedAt,
-			&c.CallFile, &c.CallLine, &c.CallColumn,
-		)
-		if err != nil {
+		if err := rows.Scan(append(c.Symbol.scanTargets(), &c.CallFile, &c.CallLine, &c.CallColumn)...); err != nil {
 			return nil, err
 		}
-		c.EndLine = endLine
-		c.EndColumn = endColumn
 		callers = append(callers, c)
 	}
 	return callers, rows.Err()
@@ -283,8 +392,7 @@ func (m *Manager) GetCallees(symbolName string, languages []string) ([]CalleeInf
 	// - Method with params: main(String[])
 	// - Qualified: Class.main
 	query := `
-		SELECT s.id, s.name, s.kind, s.file, s.line, s.column, s.end_line, s.end_column, 
-		       s.scope, s.signature, s.documentation, s.language, s.source, s.created_at,
+		SELECT ` + symbolColumns("s") + `,
 		       c.file as call_file, c.line as call_line, c.column as call_column
 		FROM symbols s
 		JOIN calls c ON s.id = c.callee_id
@@ -303,8 +411,9 @@ func (m *Manager) GetCallees(symbolName string, languages []string) ([]CalleeInf
 		}
 	}
 
-	// Group by call site to deduplicate (interface + impl at same line)
-	query += " GROUP BY c.file, c.line, c.column ORDER BY c.file, c.line"
+	// One row per call site and callee: distinct targets at one site stay
+	// distinct, and a caller matched twice does not repeat them.
+	query += " GROUP BY c.file, c.line, c.column, s.id ORDER BY c.file, c.line, c.column"
 
 	rows, err := m.db.Query(query, args...)
 	if err != nil {
@@ -315,18 +424,9 @@ func (m *Manager) GetCallees(symbolName string, languages []string) ([]CalleeInf
 	var callees []CalleeInfo
 	for rows.Next() {
 		var c CalleeInfo
-		var endLine, endColumn *int
-		err := rows.Scan(
-			&c.ID, &c.Name, &c.Kind, &c.File, &c.Line, &c.Column,
-			&endLine, &endColumn, &c.Scope, &c.Signature, &c.Documentation,
-			&c.Language, &c.Source, &c.CreatedAt,
-			&c.CallFile, &c.CallLine, &c.CallColumn,
-		)
-		if err != nil {
+		if err := rows.Scan(append(c.Symbol.scanTargets(), &c.CallFile, &c.CallLine, &c.CallColumn)...); err != nil {
 			return nil, err
 		}
-		c.EndLine = endLine
-		c.EndColumn = endColumn
 		callees = append(callees, c)
 	}
 	return callees, rows.Err()
@@ -339,7 +439,7 @@ func (m *Manager) GetSignature(symbolName string, languages []string) ([]Symbol,
 	// - Method with params: main(String[])
 	// - Qualified: Class.main
 	query := `
-		SELECT id, name, kind, file, line, column, end_line, end_column, scope, signature, documentation, language, source, created_at
+		SELECT ` + symbolColumns("") + `
 		FROM symbols
 		WHERE (name = ? OR name LIKE ? OR name LIKE ?) AND signature IS NOT NULL AND signature != ''`
 	args := []interface{}{
@@ -367,9 +467,9 @@ func (m *Manager) GetSignature(symbolName string, languages []string) ([]Symbol,
 // GetFunctionSymbols returns all function symbols for a language
 func (m *Manager) GetFunctionSymbols(language string) ([]Symbol, error) {
 	query := `
-		SELECT id, name, kind, file, line, column, end_line, end_column, scope, signature, documentation, language, source, created_at
+		SELECT ` + symbolColumns("") + `
 		FROM symbols
-		WHERE kind IN ('function', 'method') AND language = ?
+		WHERE kind IN ('function', 'method', 'constructor') AND language = ?
 		ORDER BY file, line`
 
 	rows, err := m.db.Query(query, language)
@@ -384,7 +484,7 @@ func (m *Manager) GetFunctionSymbols(language string) ([]Symbol, error) {
 // GetTypeSymbols returns all class/interface/struct symbols for a language
 func (m *Manager) GetTypeSymbols(language string) ([]Symbol, error) {
 	query := `
-		SELECT id, name, kind, file, line, column, end_line, end_column, scope, signature, documentation, language, source, created_at
+		SELECT ` + symbolColumns("") + `
 		FROM symbols
 		WHERE kind IN ('class', 'interface', 'struct', 'type', 'enum') AND language = ?
 		ORDER BY file, line`
@@ -398,6 +498,16 @@ func (m *Manager) GetTypeSymbols(language string) ([]Symbol, error) {
 	return scanSymbols(rows)
 }
 
+// GetFileSymbols returns every symbol declared in file, in declaration order.
+func (m *Manager) GetFileSymbols(file string) ([]Symbol, error) {
+	rows, err := m.db.Query(`SELECT `+symbolColumns("")+` FROM symbols WHERE file = ? ORDER BY start_line, start_column`, file)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanSymbols(rows)
+}
+
 // GetSymbolByName returns symbol by name (flexible matching)
 func (m *Manager) GetSymbolByName(name string, languages []string) ([]Symbol, error) {
 	// Match symbol names flexibly:
@@ -405,7 +515,7 @@ func (m *Manager) GetSymbolByName(name string, languages []string) ([]Symbol, er
 	// - Method with params: main(String[])
 	// - Qualified: Class.main
 	query := `
-		SELECT id, name, kind, file, line, column, end_line, end_column, scope, signature, documentation, language, source, created_at
+		SELECT ` + symbolColumns("") + `
 		FROM symbols
 		WHERE (name = ? OR name LIKE ? OR name LIKE ?)`
 	args := []interface{}{
@@ -661,16 +771,29 @@ func (m *Manager) GetDetailedStats() (*DetailedStats, error) {
 
 // Helper functions
 
+// symbolColumns is the column list every symbol read and write uses, in the
+// order of Symbol.scanTargets; alias qualifies each column when non-empty.
+func symbolColumns(alias string) string {
+	columns := []string{"id", "name", "kind", "file", "line", "column", "start_line", "start_column",
+		"end_line", "end_column", "scope", "signature", "documentation", "language", "source", "created_at"}
+	if alias != "" {
+		for i, column := range columns {
+			columns[i] = alias + "." + column
+		}
+	}
+	return strings.Join(columns, ", ")
+}
+
+func (s *Symbol) scanTargets() []any {
+	return []any{&s.ID, &s.Name, &s.Kind, &s.File, &s.Line, &s.Column, &s.StartLine, &s.StartColumn,
+		&s.EndLine, &s.EndColumn, &s.Scope, &s.Signature, &s.Documentation, &s.Language, &s.Source, &s.CreatedAt}
+}
+
 func scanSymbols(rows *sql.Rows) ([]Symbol, error) {
 	var symbols []Symbol
 	for rows.Next() {
 		var s Symbol
-		err := rows.Scan(
-			&s.ID, &s.Name, &s.Kind, &s.File, &s.Line, &s.Column,
-			&s.EndLine, &s.EndColumn, &s.Scope, &s.Signature,
-			&s.Documentation, &s.Language, &s.Source, &s.CreatedAt,
-		)
-		if err != nil {
+		if err := rows.Scan(s.scanTargets()...); err != nil {
 			return nil, err
 		}
 		symbols = append(symbols, s)

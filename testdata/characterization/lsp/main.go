@@ -90,9 +90,10 @@ func serve(mode, fixture string) error {
 		if err := json.Unmarshal(message.Params, &params); err != nil && len(message.Params) > 0 {
 			return err
 		}
-		if message.Method == "textDocument/references" || message.Method == "textDocument/prepareTypeHierarchy" {
+		switch message.Method {
+		case "textDocument/references", "textDocument/prepareTypeHierarchy", "textDocument/prepareCallHierarchy":
 			key = fmt.Sprintf("%s@%d", message.Method, params.Position.Line)
-		} else if message.Method == "typeHierarchy/supertypes" {
+		case "typeHierarchy/supertypes", "callHierarchy/incomingCalls":
 			key += "@" + params.Item.Name
 		}
 		configured, ok := results[key]
@@ -108,7 +109,11 @@ func serve(mode, fixture string) error {
 				return err
 			}
 			rootURI = params.RootURI
+			// A fixture may script the initialize result to vary capabilities.
 			result = json.RawMessage(`{"capabilities":{"documentSymbolProvider":true,"referencesProvider":true,"typeHierarchyProvider":true}}`)
+			if ok {
+				result = configured
+			}
 		} else if ok {
 			// Substitute inside encoded JSON, preserving escaping in the root URI.
 			encoded, _ := json.Marshal(rootURI)

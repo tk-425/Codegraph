@@ -1,0 +1,10 @@
+{
+  "textDocument/documentSymbol": [
+    {
+      "name": "Target",
+      "kind": 12,
+      "range": {"start": {"line": 2, "character": 7}, "end": {"line": 2, "character": 23}},
+      "selectionRange": {"start": {"line": 2, "character": 12}, "end": {"line": 2, "character": 18}}
+    }
+  ]
+}

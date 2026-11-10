@@ -50,8 +50,14 @@ func runImplementations(cmd *cobra.Command, args []string) error {
 	}
 	defer dbManager.Close()
 
+	// Parse languages filter; it applies to both tiers
+	var languages []string
+	if implementationsLangFlag != "" {
+		languages = strings.Split(implementationsLangFlag, ",")
+	}
+
 	// First, try to find implementations in the database (from type_hierarchy table)
-	dbImplementations, err := dbManager.GetImplementationsByName(interfaceName)
+	dbImplementations, err := dbManager.GetImplementationsByName(interfaceName, languages)
 	if err != nil {
 		return fmt.Errorf("failed to find implementations: %w", err)
 	}
@@ -70,12 +76,6 @@ func runImplementations(cmd *cobra.Command, args []string) error {
 	}
 
 	// If no database results, try LSP as fallback
-	// Parse languages filter
-	var languages []string
-	if implementationsLangFlag != "" {
-		languages = strings.Split(implementationsLangFlag, ",")
-	}
-
 	// Find interface symbols in database
 	symbols, err := dbManager.GetSymbolByName(interfaceName, languages)
 	if err != nil {
@@ -88,8 +88,9 @@ func runImplementations(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create LSP manager
-	rootURI := "file://" + cwd
-	lspManager := lsp.NewManager(cfg, rootURI)
+	root := lsp.NewRoot(cwd)
+	lines := lsp.NewSourceLines()
+	lspManager := lsp.NewManager(cfg, root.URI())
 	defer shutdownLiveLSP(cmd, lspManager)
 
 	ctx := commandContext(cmd)
@@ -108,11 +109,8 @@ func runImplementations(cmd *cobra.Command, args []string) error {
 		}
 
 		// Get implementations via LSP
-		fileURI := "file://" + sym.File
-		pos := lsp.Position{
-			Line:      sym.Line - 1,
-			Character: sym.Column,
-		}
+		fileURI := lsp.PathToURI(sym.File)
+		pos := lines.ToLSP(client.PositionEncoding(), sym.File, sym.Line, sym.Column)
 
 		implementations, err := client.Implementation(ctx, fileURI, pos)
 		if err != nil {
@@ -130,7 +128,10 @@ func runImplementations(cmd *cobra.Command, args []string) error {
 			}
 
 			for _, impl := range implementations {
-				implPath := strings.TrimPrefix(impl.URI, "file://")
+				implPath, perr := root.Path(impl.URI)
+				if perr != nil {
+					implPath = impl.URI
+				}
 
 				relPath, _ := filepath.Rel(cwd, implPath)
 				fmt.Printf("  %s\n", Path(fmt.Sprintf("%s:%d", relPath, impl.Range.Start.Line+1)))
@@ -160,7 +161,12 @@ func runImplementationsJSON(cmd *cobra.Command, interfaceName string) error {
 
 	records := make([]implementationRecord, 0)
 
-	dbImpls, err := dbManager.GetImplementationsByName(interfaceName)
+	var languages []string
+	if implementationsLangFlag != "" {
+		languages = strings.Split(implementationsLangFlag, ",")
+	}
+
+	dbImpls, err := dbManager.GetImplementationsByName(interfaceName, languages)
 	if err != nil {
 		return emitErr("implementations_lookup_failed", fmt.Errorf("failed to find implementations: %w", err))
 	}
@@ -182,11 +188,6 @@ func runImplementationsJSON(cmd *cobra.Command, interfaceName string) error {
 	}
 
 	// LSP fallback
-	var languages []string
-	if implementationsLangFlag != "" {
-		languages = strings.Split(implementationsLangFlag, ",")
-	}
-
 	symbols, err := dbManager.GetSymbolByName(interfaceName, languages)
 	if err != nil {
 		return emitErr("implementations_lookup_failed", fmt.Errorf("failed to find symbol: %w", err))
@@ -195,8 +196,9 @@ func runImplementationsJSON(cmd *cobra.Command, interfaceName string) error {
 		return EmitJSON(out, "implementations", &interfaceName, records, nil)
 	}
 
-	rootURI := "file://" + cwd
-	lspManager := lsp.NewManager(cfg, rootURI)
+	root := lsp.NewRoot(cwd)
+	lines := lsp.NewSourceLines()
+	lspManager := lsp.NewManager(cfg, root.URI())
 	defer shutdownLiveLSP(cmd, lspManager)
 
 	ctx := commandContext(cmd)
@@ -208,8 +210,8 @@ func runImplementationsJSON(cmd *cobra.Command, interfaceName string) error {
 		if cerr != nil {
 			continue
 		}
-		fileURI := "file://" + sym.File
-		pos := lsp.Position{Line: sym.Line - 1, Character: sym.Column}
+		fileURI := lsp.PathToURI(sym.File)
+		pos := lines.ToLSP(client.PositionEncoding(), sym.File, sym.Line, sym.Column)
 		impls, ierr := client.Implementation(ctx, fileURI, pos)
 		if ierr != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
@@ -219,7 +221,10 @@ func runImplementationsJSON(cmd *cobra.Command, interfaceName string) error {
 			continue
 		}
 		for _, impl := range impls {
-			implPath := strings.TrimPrefix(impl.URI, "file://")
+			implPath, perr := root.Path(impl.URI)
+			if perr != nil {
+				implPath = impl.URI
+			}
 			relPath, rerr := filepath.Rel(cwd, implPath)
 			if rerr != nil {
 				relPath = implPath

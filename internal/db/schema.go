@@ -1,5 +1,9 @@
 package db
 
+// FormatVersion is the index format stored in PRAGMA user_version. Format 2
+// changed symbol identity; databases created earlier report 0.
+const FormatVersion = 2
+
 // SQL statements for creating the database schema
 const (
 	CreateSymbolsTable = `
@@ -10,6 +14,8 @@ CREATE TABLE IF NOT EXISTS symbols (
     file TEXT NOT NULL,
     line INTEGER NOT NULL,
     column INTEGER NOT NULL,
+    start_line INTEGER NOT NULL DEFAULT 0,
+    start_column INTEGER NOT NULL DEFAULT 0,
     end_line INTEGER,
     end_column INTEGER,
     scope TEXT,
@@ -28,6 +34,7 @@ CREATE TABLE IF NOT EXISTS calls (
     file TEXT NOT NULL,
     line INTEGER NOT NULL,
     column INTEGER NOT NULL,
+    UNIQUE(caller_id, callee_id, file, line, column),
     FOREIGN KEY(caller_id) REFERENCES symbols(id),
     FOREIGN KEY(callee_id) REFERENCES symbols(id)
 );`
@@ -40,6 +47,23 @@ CREATE TABLE IF NOT EXISTS type_hierarchy (
     relationship TEXT NOT NULL,
     FOREIGN KEY(child_id) REFERENCES symbols(id),
     FOREIGN KEY(parent_id) REFERENCES symbols(id)
+);`
+
+	// CreateUnresolvedTable holds observed relationship sites whose target
+	// could not be identified safely. They are never resolved edges (I06).
+	CreateUnresolvedTable = `
+CREATE TABLE IF NOT EXISTS unresolved_relationships (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    language TEXT NOT NULL,
+    from_id TEXT NOT NULL DEFAULT '',
+    target_name TEXT NOT NULL,
+    file TEXT NOT NULL,
+    line INTEGER NOT NULL,
+    column INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    candidates INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(kind, file, line, column, from_id, target_name)
 );`
 
 	CreateFileMetaTable = `
@@ -62,12 +86,16 @@ CREATE INDEX IF NOT EXISTS idx_type_hierarchy_parent ON type_hierarchy(parent_id
 `
 )
 
+// graphTables are the tables a format reset drops, children first.
+var graphTables = []string{"calls", "type_hierarchy", "unresolved_relationships", "symbols", "file_meta"}
+
 // AllSchemaStatements returns all SQL statements needed to create the schema
 func AllSchemaStatements() []string {
 	return []string{
 		CreateSymbolsTable,
 		CreateCallsTable,
 		CreateTypeHierarchyTable,
+		CreateUnresolvedTable,
 		CreateFileMetaTable,
 		CreateIndexes,
 	}

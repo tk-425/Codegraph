@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -15,7 +16,8 @@ import (
 // openProject runs the common scaffolding shared by every read-only query
 // command: resolve cwd, verify .codegraph/ exists, load config, and open the
 // existing SQLite database read-only. Queries never create, initialize or
-// migrate a database; a missing file returns code "database_missing". On
+// migrate a database; a missing file returns code "database_missing" and a
+// graph in another index format returns "index_format_incompatible". On
 // failure the stable error code can go straight into an EnvelopeError. The
 // returned *db.Manager must be Closed by the caller on success.
 func openProject() (string, *config.Config, *db.Manager, string, error) {
@@ -37,6 +39,14 @@ func openProject() (string, *config.Config, *db.Manager, string, error) {
 	}
 	dbm, err := db.OpenReadOnly(dbPath)
 	if err != nil {
+		return cwd, cfg, nil, "db_open_failed", err
+	}
+	if err := dbm.CheckFormat(); err != nil {
+		dbm.Close()
+		var incompatible *db.IncompatibleFormatError
+		if errors.As(err, &incompatible) {
+			return cwd, cfg, nil, "index_format_incompatible", err
+		}
 		return cwd, cfg, nil, "db_open_failed", err
 	}
 	return cwd, cfg, dbm, "", nil

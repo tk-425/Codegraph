@@ -3,7 +3,6 @@ package lsp
 import (
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -114,9 +113,8 @@ func parseTypeScriptVersion(raw string) (typeScriptVersion, error) {
 }
 
 func projectRootFromURI(rootURI string) string {
-	parsed, err := url.Parse(rootURI)
-	if err == nil && parsed.Path != "" {
-		return parsed.Path
+	if path, err := URIToPath(rootURI); err == nil {
+		return path
 	}
 	return strings.TrimPrefix(rootURI, "file://")
 }
