@@ -2,13 +2,9 @@ package cli
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
-	"github.com/tk-425/Codegraph/internal/config"
-	"github.com/tk-425/Codegraph/internal/db"
 )
 
 var healthCmd = &cobra.Command{
@@ -42,47 +38,35 @@ func runHealth(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("🏥 %s\n\n", Bold("Checking codegraph health..."))
 
-	// Get current directory
-	cwd, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("failed to get current directory: %w", err)
+	// The same open sequence queries use, so health refuses what they refuse.
+	_, cfg, dbManager, failure := openSequence()
+	if failure.at(stepCwd) {
+		return fmt.Errorf("failed to get current directory: %w", failure.err)
 	}
-
-	// Check if codegraph is initialized
-	codegraphDir := filepath.Join(cwd, ".codegraph")
-	if _, err := os.Stat(codegraphDir); os.IsNotExist(err) {
+	if failure.at(stepInitialized) {
 		fmt.Printf("❌ %s: Run 'codegraph init' first\n", Error("Not initialized"))
 		return nil
 	}
 	fmt.Printf("✅ %s: .codegraph/ directory exists\n", Success("Initialized"))
 
-	// Load config
-	cfg, err := config.Load(cwd)
-	if err != nil {
-		fmt.Printf("❌ %s: %v\n", Error("Config error"), err)
+	if failure.at(stepConfig) {
+		fmt.Printf("❌ %s: %v\n", Error("Config error"), failure.err)
 		return nil
 	}
 	fmt.Printf("✅ %s: config.toml loaded\n", Success("Config"))
 
-	// Check database
-	dbPath := cfg.GetDatabasePath(cwd)
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+	switch {
+	case failure.at(stepDatabaseFile):
 		fmt.Printf("❌ %s: not found\n", Error("Database"))
 		return nil
-	}
-
-	dbManager, err := db.OpenReadOnly(dbPath)
-	if err != nil {
-		fmt.Printf("❌ %s: %v\n", Error("Database error"), err)
+	case failure.at(stepDatabaseOpen):
+		fmt.Printf("❌ %s: %v\n", Error("Database error"), failure.err)
+		return nil
+	case failure != nil:
+		fmt.Printf("❌ %s: %v\n", Error("Database"), failure.err)
 		return nil
 	}
 	defer dbManager.Close()
-
-	// Queries refuse an index in another format, so health must too.
-	if err := dbManager.CheckFormat(); err != nil {
-		fmt.Printf("❌ %s: %v\n", Error("Database"), err)
-		return nil
-	}
 
 	// Get stats
 	stats, err := dbManager.GetStats()
@@ -122,43 +106,33 @@ func runHealthJSON(cmd *cobra.Command) error {
 	out := cmd.OutOrStdout()
 	records := []healthRecord{}
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		_ = EmitJSON(out, "health", nil, records, []EnvelopeError{{Code: "cwd_failed", Message: err.Error()}})
-		return err
+	_, cfg, dbManager, failure := openSequence()
+	if failure.at(stepCwd) {
+		_ = EmitJSON(out, "health", nil, records, []EnvelopeError{{Code: "cwd_failed", Message: failure.err.Error()}})
+		return failure.err
 	}
 
-	codegraphDir := filepath.Join(cwd, ".codegraph")
-	if _, err := os.Stat(codegraphDir); os.IsNotExist(err) {
+	if failure.at(stepInitialized) {
 		records = append(records, healthRecord{Category: "initialized", Name: "initialized", OK: false, Detail: "codegraph not initialized. Run 'codegraph init' first"})
 		return EmitJSON(out, "health", nil, records, nil)
 	}
 	records = append(records, healthRecord{Category: "initialized", Name: "initialized", OK: true, Detail: ".codegraph/ directory exists"})
 
-	cfg, err := config.Load(cwd)
-	if err != nil {
-		records = append(records, healthRecord{Category: "config", Name: "config", OK: false, Detail: err.Error()})
+	if failure.at(stepConfig) {
+		records = append(records, healthRecord{Category: "config", Name: "config", OK: false, Detail: failure.err.Error()})
 		return EmitJSON(out, "health", nil, records, nil)
 	}
 	records = append(records, healthRecord{Category: "config", Name: "config", OK: true, Detail: "config.toml loaded"})
 
-	dbPath := cfg.GetDatabasePath(cwd)
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+	if failure.at(stepDatabaseFile) {
 		records = append(records, healthRecord{Category: "database", Name: "database", OK: false, Detail: "not found"})
 		return EmitJSON(out, "health", nil, records, nil)
 	}
-
-	dbManager, err := db.OpenReadOnly(dbPath)
-	if err != nil {
-		records = append(records, healthRecord{Category: "database", Name: "database", OK: false, Detail: err.Error()})
+	if failure != nil {
+		records = append(records, healthRecord{Category: "database", Name: "database", OK: false, Detail: failure.err.Error()})
 		return EmitJSON(out, "health", nil, records, nil)
 	}
 	defer dbManager.Close()
-
-	if err := dbManager.CheckFormat(); err != nil {
-		records = append(records, healthRecord{Category: "database", Name: "database", OK: false, Detail: err.Error()})
-		return EmitJSON(out, "health", nil, records, nil)
-	}
 
 	stats, err := dbManager.GetStats()
 	if err != nil {
