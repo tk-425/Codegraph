@@ -13,43 +13,90 @@ import (
 	"github.com/tk-425/Codegraph/internal/db"
 )
 
-// openProject runs the common scaffolding shared by every read-only query
-// command: resolve cwd, verify .codegraph/ exists, load config, and open the
-// existing SQLite database read-only. Queries never create, initialize or
-// migrate a database; a missing file returns code "database_missing" and a
-// graph in another index format returns "index_format_incompatible". On
-// failure the stable error code can go straight into an EnvelopeError. The
-// returned *db.Manager must be Closed by the caller on success.
-func openProject() (string, *config.Config, *db.Manager, string, error) {
+// openStep is one step of the open sequence, in the order openSequence runs
+// them.
+type openStep int
+
+const (
+	stepCwd openStep = iota
+	stepInitialized
+	stepConfig
+	stepDatabaseFile
+	stepDatabaseOpen
+	stepDatabaseFormat
+)
+
+// openFailure names the step of the open sequence that failed. err is the
+// cause as raised, before any command words it.
+type openFailure struct {
+	step openStep
+	err  error
+}
+
+// at reports whether the sequence stopped at step. A nil failure is at no
+// step.
+func (f *openFailure) at(step openStep) bool { return f != nil && f.step == step }
+
+// openSequence is the one path by which a command reads an existing graph:
+// resolve cwd, verify .codegraph/ exists, load config, and open the SQLite
+// database read-only, refusing a graph in another index format. It never
+// creates, initializes or migrates anything. Queries reach it through
+// openProject; health renders each step itself. A guard added here reaches
+// both. The returned *db.Manager must be Closed by the caller on success.
+func openSequence() (string, *config.Config, *db.Manager, *openFailure) {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return "", nil, nil, "cwd_failed", fmt.Errorf("failed to get current directory: %w", err)
+		return "", nil, nil, &openFailure{stepCwd, err}
 	}
 	codegraphDir := filepath.Join(cwd, ".codegraph")
 	if _, statErr := os.Stat(codegraphDir); os.IsNotExist(statErr) {
-		return cwd, nil, nil, "not_initialized", fmt.Errorf("codegraph not initialized. Run 'codegraph init' first")
+		return cwd, nil, nil, &openFailure{stepInitialized, fmt.Errorf("codegraph not initialized. Run 'codegraph init' first")}
 	}
 	cfg, err := config.Load(cwd)
 	if err != nil {
-		return cwd, nil, nil, "config_load_failed", fmt.Errorf("failed to load config: %w", err)
+		return cwd, nil, nil, &openFailure{stepConfig, err}
 	}
 	dbPath := cfg.GetDatabasePath(cwd)
 	if _, statErr := os.Stat(dbPath); os.IsNotExist(statErr) {
-		return cwd, cfg, nil, "database_missing", fmt.Errorf("database not found. Run 'codegraph build' first")
+		return cwd, cfg, nil, &openFailure{stepDatabaseFile, fmt.Errorf("database not found. Run 'codegraph build' first")}
 	}
 	dbm, err := db.OpenReadOnly(dbPath)
 	if err != nil {
-		return cwd, cfg, nil, "db_open_failed", err
+		return cwd, cfg, nil, &openFailure{stepDatabaseOpen, err}
 	}
 	if err := dbm.CheckFormat(); err != nil {
 		dbm.Close()
-		var incompatible *db.IncompatibleFormatError
-		if errors.As(err, &incompatible) {
-			return cwd, cfg, nil, "index_format_incompatible", err
-		}
-		return cwd, cfg, nil, "db_open_failed", err
+		return cwd, cfg, nil, &openFailure{stepDatabaseFormat, err}
 	}
-	return cwd, cfg, dbm, "", nil
+	return cwd, cfg, dbm, nil
+}
+
+// openProject runs openSequence for a read-only query command and words its
+// failure for the envelope: a missing file returns code "database_missing"
+// and a graph in another index format returns "index_format_incompatible".
+// On failure the stable error code can go straight into an EnvelopeError.
+// The returned *db.Manager must be Closed by the caller on success.
+func openProject() (string, *config.Config, *db.Manager, string, error) {
+	cwd, cfg, dbm, failure := openSequence()
+	if failure == nil {
+		return cwd, cfg, dbm, "", nil
+	}
+	switch failure.step {
+	case stepCwd:
+		return cwd, cfg, nil, "cwd_failed", fmt.Errorf("failed to get current directory: %w", failure.err)
+	case stepInitialized:
+		return cwd, cfg, nil, "not_initialized", failure.err
+	case stepConfig:
+		return cwd, cfg, nil, "config_load_failed", fmt.Errorf("failed to load config: %w", failure.err)
+	case stepDatabaseFile:
+		return cwd, cfg, nil, "database_missing", failure.err
+	case stepDatabaseFormat:
+		var incompatible *db.IncompatibleFormatError
+		if errors.As(failure.err, &incompatible) {
+			return cwd, cfg, nil, "index_format_incompatible", failure.err
+		}
+	}
+	return cwd, cfg, nil, "db_open_failed", failure.err
 }
 
 // jsonOutputFlag is set by the persistent --json root flag. When true,
