@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/tk-425/Codegraph/internal/db"
 )
 
 type cmdCase struct {
@@ -169,8 +170,17 @@ func TestJSONErrors_NonJSONRegression(t *testing.T) {
 	cases := []regressionCase{
 		{
 			name: "search", prefix: "🔍",
-			setup: func(t *testing.T) { setupCodegraphProject(t); jsonOutputFlag = false },
-			run:   runSearch, args: []string{"nope"},
+			setup: func(t *testing.T) {
+				// Seed a match so the DB tier answers; otherwise search falls
+				// through to ripgrep and fails on hosts without rg.
+				_, m := setupCodegraphProject(t)
+				seedSymbol(t, m, db.Symbol{
+					ID: "src/nope.go#nope", Name: "nope", Kind: "function",
+					File: "src/nope.go", Line: 1, Language: "go",
+				})
+				jsonOutputFlag = false
+			},
+			run: runSearch, args: []string{"nope"},
 		},
 		{
 			name: "signature", prefix: "📝",
@@ -228,13 +238,14 @@ func TestJSONErrors_NonJSONRegression(t *testing.T) {
 			t.Cleanup(func() { jsonOutputFlag = false })
 
 			c := &cobra.Command{Use: tc.name, RunE: tc.run}
+			var runErr error
 			out := captureStdout(t, func() {
-				_ = c.RunE(c, tc.args)
+				runErr = c.RunE(c, tc.args)
 			})
 
 			first := firstNonEmptyLine(out)
 			if !strings.HasPrefix(strings.TrimLeft(first, " \t"), tc.prefix) {
-				t.Errorf("first non-empty stdout line did not start with %q\nfirst line: %q\nfull output:\n%s", tc.prefix, first, out)
+				t.Errorf("first non-empty stdout line did not start with %q\nfirst line: %q\nRunE error: %v\nfull output:\n%s", tc.prefix, first, runErr, out)
 			}
 		})
 	}
