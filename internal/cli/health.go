@@ -78,6 +78,12 @@ func runHealth(cmd *cobra.Command, args []string) error {
 	}
 	defer dbManager.Close()
 
+	// Queries refuse an index in another format, so health must too.
+	if err := dbManager.CheckFormat(); err != nil {
+		fmt.Printf("❌ %s: %v\n", Error("Database"), err)
+		return nil
+	}
+
 	// Get stats
 	stats, err := dbManager.GetStats()
 	if err != nil {
@@ -148,6 +154,11 @@ func runHealthJSON(cmd *cobra.Command) error {
 		return EmitJSON(out, "health", nil, records, nil)
 	}
 	defer dbManager.Close()
+
+	if err := dbManager.CheckFormat(); err != nil {
+		records = append(records, healthRecord{Category: "database", Name: "database", OK: false, Detail: err.Error()})
+		return EmitJSON(out, "health", nil, records, nil)
+	}
 
 	stats, err := dbManager.GetStats()
 	if err != nil {
