@@ -18,6 +18,10 @@ type Manager struct {
 	dbPath string
 }
 
+// busyTimeoutMS bounds how long a writer or reader waits on a lock
+// before failing explicitly (T22). A var so tests can shorten it.
+var busyTimeoutMS = 5000
+
 // NewManager creates a new database manager
 func NewManager(dbPath string) (*Manager, error) {
 	// Ensure directory exists
@@ -31,8 +35,11 @@ func NewManager(dbPath string) (*Manager, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 	// Foreign keys are a per-connection setting, so the DSN carries it to
-	// every pooled connection.
-	db, err := sql.Open("sqlite3", fileDSN(absPath, "_foreign_keys=on"))
+	// every pooled connection. Transactions take the write lock at BEGIN
+	// (BEGIN IMMEDIATE), so a second publisher fails within the busy
+	// timeout instead of deadlocking on a deferred upgrade; readers get a
+	// bounded wait for a commit window and never see a mixture (T22).
+	db, err := sql.Open("sqlite3", fileDSN(absPath, fmt.Sprintf("_foreign_keys=on&_busy_timeout=%d&_txlock=immediate", busyTimeoutMS)))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -61,7 +68,7 @@ func OpenReadOnly(dbPath string) (*Manager, error) {
 	if _, err := os.Stat(absPath); err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
-	db, err := sql.Open("sqlite3", fileDSN(absPath, "mode=ro"))
+	db, err := sql.Open("sqlite3", fileDSN(absPath, fmt.Sprintf("mode=ro&_busy_timeout=%d", busyTimeoutMS)))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -73,7 +80,9 @@ func OpenReadOnly(dbPath string) (*Manager, error) {
 }
 
 // Initialize creates all tables and indexes. A database created here is
-// stamped with the current FormatVersion.
+// stamped with the current FormatVersion, and a format-2 database created
+// before the file_meta fingerprint columns gets them added additively
+// (never by a format bump; queries never run this, only the build path).
 func (m *Manager) Initialize() error {
 	var existing int
 	if err := m.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'symbols'`).Scan(&existing); err != nil {
@@ -84,9 +93,47 @@ func (m *Manager) Initialize() error {
 			return fmt.Errorf("failed to execute schema statement: %w", err)
 		}
 	}
+	if err := m.addMissingFileMetaColumns(); err != nil {
+		return err
+	}
 	if existing == 0 {
 		if _, err := m.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", FormatVersion)); err != nil {
 			return fmt.Errorf("failed to stamp format version: %w", err)
+		}
+	}
+	return nil
+}
+
+// addMissingFileMetaColumns inspects file_meta and adds any fingerprint
+// column an older format-2 database lacks.
+func (m *Manager) addMissingFileMetaColumns() error {
+	rows, err := m.db.Query(`PRAGMA table_info(file_meta)`)
+	if err != nil {
+		return fmt.Errorf("failed to inspect file_meta: %w", err)
+	}
+	defer rows.Close()
+	present := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull int
+		var dfltValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &dfltValue, &pk); err != nil {
+			return err
+		}
+		present[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, column := range fileMetaColumns {
+		name, _, _ := strings.Cut(column, " ")
+		if present[name] {
+			continue
+		}
+		if _, err := m.db.Exec("ALTER TABLE file_meta ADD COLUMN " + column); err != nil {
+			return fmt.Errorf("failed to extend file_meta with %s: %w", name, err)
 		}
 	}
 	return nil
@@ -123,79 +170,18 @@ func (m *Manager) CheckFormat() error {
 	return nil
 }
 
-// ResetFormat drops the graph tables and recreates them in the current
-// format, in one transaction: on failure the previous database is unchanged.
-// Only an explicitly requested rebuild calls it; the graph data is discarded.
-func (m *Manager) ResetFormat() error {
-	tx, err := m.db.Begin()
-	if err != nil {
-		return fmt.Errorf("failed to begin format reset: %w", err)
-	}
-	defer tx.Rollback()
-	for _, table := range graphTables {
-		if _, err := tx.Exec("DROP TABLE IF EXISTS " + table); err != nil {
-			return fmt.Errorf("failed to drop %s: %w", table, err)
-		}
-	}
-	for _, stmt := range AllSchemaStatements() {
-		if _, err := tx.Exec(stmt); err != nil {
-			return fmt.Errorf("failed to execute schema statement: %w", err)
-		}
-	}
-	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", FormatVersion)); err != nil {
-		return fmt.Errorf("failed to stamp format version: %w", err)
-	}
-	return tx.Commit()
-}
+// ResetFormat's drop-recreate-stamp sequence now runs inside a
+// publication transaction (RefreshPlan.ResetFormat) so a failed rebuild
+// cannot erase a legacy snapshot. Only Publish resets.
 
 // Close closes the database connection
 func (m *Manager) Close() error {
 	return m.db.Close()
 }
 
-// ClearAll deletes all data (for full rebuild)
-func (m *Manager) ClearAll() error {
-	for _, table := range graphTables {
-		if _, err := m.db.Exec(fmt.Sprintf("DELETE FROM %s", table)); err != nil {
-			return fmt.Errorf("failed to clear %s: %w", table, err)
-		}
-	}
-	return nil
-}
-
-// ClearCalls deletes all calls for a specific language
-func (m *Manager) ClearCalls(language string) error {
-	query := `
-		DELETE FROM calls 
-		WHERE caller_id IN (
-			SELECT id FROM symbols WHERE language = ?
-		)`
-
-	if _, err := m.db.Exec(query, language); err != nil {
-		return fmt.Errorf("failed to clear calls for %s: %w", language, err)
-	}
-	if _, err := m.db.Exec(`DELETE FROM unresolved_relationships WHERE kind = 'call' AND language = ?`, language); err != nil {
-		return fmt.Errorf("failed to clear unresolved calls for %s: %w", language, err)
-	}
-	return nil
-}
-
-// ClearTypeHierarchy deletes all type hierarchy for a specific language
-func (m *Manager) ClearTypeHierarchy(language string) error {
-	query := `
-		DELETE FROM type_hierarchy 
-		WHERE child_id IN (
-			SELECT id FROM symbols WHERE language = ?
-		)`
-
-	if _, err := m.db.Exec(query, language); err != nil {
-		return fmt.Errorf("failed to clear type hierarchy for %s: %w", language, err)
-	}
-	if _, err := m.db.Exec(`DELETE FROM unresolved_relationships WHERE kind != 'call' AND language = ?`, language); err != nil {
-		return fmt.Errorf("failed to clear unresolved type relationships for %s: %w", language, err)
-	}
-	return nil
-}
+// BeginFile is the graphStore hook for a provider attempt starting at a
+// file. The published graph has nothing buffered, so it is a no-op here.
+func (m *Manager) BeginFile(path string) {}
 
 // InsertSymbol inserts a symbol into the database
 func (m *Manager) InsertSymbol(s *Symbol) error {
@@ -544,23 +530,88 @@ func (m *Manager) GetSymbolByName(name string, languages []string) ([]Symbol, er
 
 // GetStats is defined below with Stats struct
 
-// UpdateFileMeta updates file metadata for incremental builds
-func (m *Manager) UpdateFileMeta(path string, modTime time.Time, language string) error {
+// RecordFileMeta upserts one file's refresh metadata: fingerprint,
+// provider, source mtime and extraction time (R02).
+func (m *Manager) RecordFileMeta(meta FileMeta) error {
 	_, err := m.db.Exec(`
-		INSERT OR REPLACE INTO file_meta (path, mod_time, language)
-		VALUES (?, ?, ?)`,
-		path, modTime, language,
+		INSERT OR REPLACE INTO file_meta (path, mod_time, language, content_hash, provider, extracted_at)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		meta.Path, meta.ModTime, meta.Language, meta.ContentHash, meta.Provider, meta.ExtractedAt,
 	)
 	return err
+}
+
+// ListFileMeta returns the published manifest: every indexed file with
+// its language. It is what a refresh reconciles the current scan against,
+// including on a legacy database whose narrower file_meta must still be
+// readable so an explicit rebuild can replace it (R05, T23).
+func (m *Manager) ListFileMeta() ([]FileMeta, error) {
+	exists, err := m.tableExists("file_meta")
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, nil
+	}
+	rows, err := m.db.Query("SELECT path, mod_time, language FROM file_meta")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var manifest []FileMeta
+	for rows.Next() {
+		var meta FileMeta
+		if err := rows.Scan(&meta.Path, &meta.ModTime, &meta.Language); err != nil {
+			return nil, err
+		}
+		manifest = append(manifest, meta)
+	}
+	return manifest, rows.Err()
+}
+
+// tableExists reports whether name is a table in the database.
+func (m *Manager) tableExists(name string) (bool, error) {
+	var count int
+	if err := m.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, name).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// GetProviderDigests returns the stored provider digest per language: the
+// configuration a snapshot was last extracted under. A database without
+// the table — a legacy one — has none, so everything re-extracts.
+func (m *Manager) GetProviderDigests() (map[string]string, error) {
+	exists, err := m.tableExists("provider_state")
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return map[string]string{}, nil
+	}
+	rows, err := m.db.Query("SELECT language, digest FROM provider_state")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	digests := map[string]string{}
+	for rows.Next() {
+		var language, digest string
+		if err := rows.Scan(&language, &digest); err != nil {
+			return nil, err
+		}
+		digests[language] = digest
+	}
+	return digests, rows.Err()
 }
 
 // GetFileMeta gets file metadata
 func (m *Manager) GetFileMeta(path string) (*FileMeta, error) {
 	var fm FileMeta
 	err := m.db.QueryRow(
-		"SELECT path, mod_time, language FROM file_meta WHERE path = ?",
+		"SELECT path, mod_time, language, content_hash, provider, extracted_at FROM file_meta WHERE path = ?",
 		path,
-	).Scan(&fm.Path, &fm.ModTime, &fm.Language)
+	).Scan(&fm.Path, &fm.ModTime, &fm.Language, &fm.ContentHash, &fm.Provider, &fm.ExtractedAt)
 
 	if err == sql.ErrNoRows {
 		return nil, nil

@@ -51,12 +51,12 @@ var buildCmd = &cobra.Command{
 		"3. Extracts symbols from all source files\n" +
 		"4. Stores symbols in the database\n\n" +
 		"Edit `.codegraph/.cgignore` and rerun `codegraph build` to change what gets indexed.\n\n" +
-		"Use --force to perform a full rebuild (delete and recreate database).",
+		"Use --force to recompute every file from the current inputs and replace the index atomically.",
 	RunE: runBuild,
 }
 
 func init() {
-	buildCmd.Flags().BoolVar(&forceFlag, "force", false, "Force full rebuild (delete and recreate database)")
+	buildCmd.Flags().BoolVar(&forceFlag, "force", false, "Recompute every file and replace the index atomically")
 	supportJSON(buildCmd)
 	rootCmd.AddCommand(buildCmd)
 }
@@ -105,15 +105,12 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	}
 
 	languages := indexer.DetectedLanguages(files)
-	if len(languages) == 0 {
-		if jsonOutputFlag {
-			return EmitJSON(cmd.OutOrStdout(), "build", nil, []buildDiagnosticRecord{}, nil)
-		}
-		fmt.Printf("⚠️  %s\n", Warning("No supported source files found"))
-		return nil
-	}
 	if !jsonOutputFlag {
-		fmt.Printf("🔍 Found %s files in %s languages (%s)\n", Info(len(files)), Info(len(languages)), Keyword(strings.Join(languages, ", ")))
+		if len(languages) == 0 {
+			fmt.Printf("⚠️  %s\n", Warning("No supported source files found"))
+		} else {
+			fmt.Printf("🔍 Found %s files in %s languages (%s)\n", Info(len(files)), Info(len(languages)), Keyword(strings.Join(languages, ", ")))
+		}
 	}
 
 	// Open database
@@ -125,21 +122,20 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	defer dbManager.Close()
 
 	// A graph in another index format is never extended: only an explicitly
-	// requested rebuild replaces it (D06).
-	if err := dbManager.CheckFormat(); err != nil {
+	// requested rebuild replaces it (D06), and the replacement runs inside
+	// the publication transaction so a failed rebuild leaves the legacy
+	// snapshot intact (R05, T23). Initialization is likewise deferred to
+	// that publication — nothing writes a legacy database before it.
+	formatErr := dbManager.CheckFormat()
+	if formatErr != nil {
 		var incompatible *db.IncompatibleFormatError
-		if !errors.As(err, &incompatible) {
-			return withCode("database_init_failed", err)
+		if !errors.As(formatErr, &incompatible) {
+			return withCode("database_init_failed", formatErr)
 		}
 		if !forceFlag {
-			return withCode("index_format_incompatible", err)
+			return withCode("index_format_incompatible", formatErr)
 		}
-		if err := dbManager.ResetFormat(); err != nil {
-			return withCode("database_init_failed", fmt.Errorf("failed to reset index format: %w", err))
-		}
-	}
-
-	if err := dbManager.Initialize(); err != nil {
+	} else if err := dbManager.Initialize(); err != nil {
 		return withCode("database_init_failed", fmt.Errorf("failed to initialize database: %w", err))
 	}
 

@@ -56,11 +56,17 @@ type TypeHierarchy struct {
 	Relationship string `json:"relationship"` // "extends" or "implements"
 }
 
-// FileMeta stores file metadata for incremental builds
+// FileMeta stores file metadata for incremental builds: the content
+// fingerprint and provider that decide whether a refresh may skip the
+// file, the source mtime (distinct from extraction time, R02), and the
+// extraction time itself.
 type FileMeta struct {
-	Path     string    `json:"path"`
-	ModTime  time.Time `json:"mod_time"`
-	Language string    `json:"language"`
+	Path        string    `json:"path"`
+	ModTime     time.Time `json:"mod_time"` // source mtime
+	Language    string    `json:"language"`
+	ContentHash string    `json:"content_hash"` // fingerprint of indexed bytes
+	Provider    string    `json:"provider"`     // lsp or tree-sitter
+	ExtractedAt time.Time `json:"extracted_at"` // when this attempt indexed it
 }
 
 // Unresolved is an observed relationship site whose target could not be

@@ -40,7 +40,7 @@ func TestOpenReadOnlyReadsButRejectsWrites(t *testing.T) {
 			if _, err := reader.GetStats(); err != nil {
 				t.Fatalf("read: %v", err)
 			}
-			if err := reader.UpdateFileMeta("x.go", time.Now(), "go"); err == nil {
+			if err := reader.RecordFileMeta(FileMeta{Path: "x.go", ModTime: time.Now(), Language: "go"}); err == nil {
 				t.Fatal("read-only database accepted a write")
 			}
 		})

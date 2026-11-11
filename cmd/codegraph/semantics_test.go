@@ -190,3 +190,44 @@ func TestAwkwardProjectPathBuildsAndQueries(t *testing.T) {
 		t.Errorf("result path not preserved: %s", result.stdout)
 	}
 }
+
+// T23: a forced rebuild of a legacy index that fails before it can publish
+// leaves the legacy database byte-for-byte intact — data and version stamp
+// — because nothing writes a legacy graph until a publication succeeds.
+func TestFailedForceRebuildPreservesLegacyIndex(t *testing.T) {
+	root := newSyntaxProject(t, map[string]string{
+		"source.go": "package fixture\n\nfunc Target() {}\n\nfunc Caller() { Target() }\n",
+	})
+	requireBuild(t, root)
+	dbPath := filepath.Join(root, ".codegraph", "graphs", "codegraph.db")
+	conn, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec("PRAGMA user_version = 0"); err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	legacy := fileDigest(t, dbPath)
+
+	// A rebuild that cannot finish: its source is unreadable, so the
+	// attempt fails before any publication could run.
+	source := filepath.Join(root, "source.go")
+	if err := os.Chmod(source, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(source, 0o644) })
+	result := runCLI(t, root, "build", "--json", "--force")
+	if result.exit == 0 {
+		t.Fatalf("T23: failed rebuild reported success: %s", result.stdout)
+	}
+
+	if fileDigest(t, dbPath) != legacy {
+		t.Error("T23: failed forced rebuild modified the legacy database")
+	}
+	if got := userVersion(t, root); got != 0 {
+		t.Errorf("T23: legacy version stamp after failed rebuild = %d, want 0", got)
+	}
+	// The transition outcome stays explicit: the legacy index still refuses.
+	requireErrorCode(t, runCLI(t, root, "search", "Target", "--json"), "index_format_incompatible")
+}

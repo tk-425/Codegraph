@@ -70,7 +70,20 @@ CREATE TABLE IF NOT EXISTS unresolved_relationships (
 CREATE TABLE IF NOT EXISTS file_meta (
     path TEXT PRIMARY KEY,
     mod_time TIMESTAMP NOT NULL,
-    language TEXT NOT NULL
+    language TEXT NOT NULL,
+    content_hash TEXT NOT NULL DEFAULT '',
+    provider TEXT NOT NULL DEFAULT '',
+    extracted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);`
+
+	// CreateProviderStateTable stores, per language, the digest of the
+	// provider configuration and capabilities a snapshot was extracted
+	// with. A change invalidates that language's extraction (R02).
+	CreateProviderStateTable = `
+CREATE TABLE IF NOT EXISTS provider_state (
+    language TEXT PRIMARY KEY,
+    digest TEXT NOT NULL,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );`
 
 	// Indexes for faster queries
@@ -84,10 +97,19 @@ CREATE INDEX IF NOT EXISTS idx_calls_callee ON calls(callee_id);
 CREATE INDEX IF NOT EXISTS idx_type_hierarchy_child ON type_hierarchy(child_id);
 CREATE INDEX IF NOT EXISTS idx_type_hierarchy_parent ON type_hierarchy(parent_id);
 `
+
+	// RepairCallsUniqueness backfills the call-site uniqueness that the
+	// calls table's UNIQUE constraint only gives databases created after
+	// it was added: duplicates collapse to their first row, then the index
+	// enforces the constraint from then on. Idempotent on every run.
+	RepairCallsUniqueness = `
+DELETE FROM calls WHERE id NOT IN (SELECT MIN(id) FROM calls GROUP BY caller_id, callee_id, file, line, column);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_calls_site ON calls(caller_id, callee_id, file, line, column);
+`
 )
 
 // graphTables are the tables a format reset drops, children first.
-var graphTables = []string{"calls", "type_hierarchy", "unresolved_relationships", "symbols", "file_meta"}
+var graphTables = []string{"calls", "type_hierarchy", "unresolved_relationships", "symbols", "file_meta", "provider_state"}
 
 // AllSchemaStatements returns all SQL statements needed to create the schema
 func AllSchemaStatements() []string {
@@ -97,6 +119,20 @@ func AllSchemaStatements() []string {
 		CreateTypeHierarchyTable,
 		CreateUnresolvedTable,
 		CreateFileMetaTable,
+		CreateProviderStateTable,
 		CreateIndexes,
+		RepairCallsUniqueness,
 	}
+}
+
+// fileMetaColumns are the columns a format-2 database can be missing; they
+// arrive additively, never by a format bump. Rows that predate a column
+// keep its default, and an empty content hash never skips a file.
+var fileMetaColumns = []string{
+	"content_hash TEXT NOT NULL DEFAULT ''",
+	"provider TEXT NOT NULL DEFAULT ''",
+	// ALTER TABLE cannot add a column with CURRENT_TIMESTAMP (a non-constant
+	// default), so migration stamps the epoch; new rows always write a real
+	// extraction time explicitly.
+	"extracted_at TIMESTAMP NOT NULL DEFAULT '1970-01-01 00:00:00'",
 }
