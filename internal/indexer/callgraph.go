@@ -11,7 +11,7 @@ import (
 
 // CallGraphIndexer extracts calls from a language server
 type CallGraphIndexer struct {
-	db       *db.Manager
+	store    graphStore
 	mgr      *lsp.Manager
 	rootPath string
 	// failures counts failed requests of the latest IndexCallGraph call.
@@ -19,9 +19,9 @@ type CallGraphIndexer struct {
 }
 
 // NewCallGraphIndexer creates a new call graph indexer
-func NewCallGraphIndexer(dbManager *db.Manager, lspManager *lsp.Manager, rootPath string) *CallGraphIndexer {
+func NewCallGraphIndexer(store graphStore, lspManager *lsp.Manager, rootPath string) *CallGraphIndexer {
 	return &CallGraphIndexer{
-		db:       dbManager,
+		store:    store,
 		mgr:      lspManager,
 		rootPath: rootPath,
 	}
@@ -42,19 +42,18 @@ func (c *CallGraphIndexer) IndexCallGraph(ctx context.Context, language string) 
 		return 0, fmt.Errorf("failed to get LSP client: %w", err)
 	}
 
-	// Clear existing call graph for this language to avoid duplicates
-	if err := c.db.ClearCalls(language); err != nil {
-		return 0, fmt.Errorf("failed to clear existing calls: %w", err)
-	}
+	// The published call set of this language is replaced at publication
+	// (db.Manager.Publish), not here: extraction output is a candidate
+	// until then (R05).
 
 	// Get all function symbols from database
-	symbols, err := c.db.GetFunctionSymbols(language)
+	symbols, err := c.store.GetFunctionSymbols(language)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get function symbols: %w", err)
 	}
 
 	pass := &callPass{
-		db:          c.db,
+		store:       c.store,
 		language:    language,
 		root:        lsp.NewRoot(c.rootPath),
 		lines:       lsp.NewSourceLines(),
@@ -128,7 +127,7 @@ func (c *CallGraphIndexer) IndexCallGraph(ctx context.Context, language string) 
 
 // callPass holds what one call-graph pass learns about each file.
 type callPass struct {
-	db          *db.Manager
+	store       graphStore
 	language    string
 	root        lsp.Root
 	lines       *lsp.SourceLines
@@ -141,7 +140,7 @@ func (p *callPass) fileSymbols(path string) (fileSymbols, error) {
 	if symbols, ok := p.symbols[path]; ok {
 		return symbols, nil
 	}
-	symbols, err := loadFileSymbols(p.db, path)
+	symbols, err := loadFileSymbols(p.store, path)
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +179,7 @@ func (p *callPass) reference(ctx context.Context, callee db.Symbol, path string,
 	if sites == nil {
 		// No syntax to prove an invocation: recorded, never a call.
 		site.Reason = reasonUnvalidated
-		return false, p.db.InsertUnresolved(site)
+		return false, p.store.InsertUnresolved(site)
 	}
 	if !sites[position{line, column}] {
 		return false, nil // a reference that is not a call (I06)
@@ -189,9 +188,9 @@ func (p *callPass) reference(ctx context.Context, callee db.Symbol, path string,
 	caller := symbols.enclosing(line, column, callableKinds)
 	if caller == nil {
 		site.Reason = reasonUnresolved
-		return false, p.db.InsertUnresolved(site)
+		return false, p.store.InsertUnresolved(site)
 	}
-	err = p.db.InsertCall(&db.Call{
+	err = p.store.InsertCall(&db.Call{
 		CallerID: caller.ID,
 		CalleeID: callee.ID,
 		File:     path,
@@ -235,12 +234,12 @@ func (p *callPass) incoming(ctx context.Context, client *lsp.Client, uri string,
 				siteLine, siteColumn := p.lines.FromLSP(p.enc, path, r.Start)
 				if caller == nil {
 					site := &db.Unresolved{Kind: "call", Language: p.language, TargetName: callee.Name, File: path, Line: siteLine, Column: siteColumn, Reason: reasonUnresolved}
-					if err := p.db.InsertUnresolved(site); err != nil {
+					if err := p.store.InsertUnresolved(site); err != nil {
 						return stored, err
 					}
 					continue
 				}
-				if err := p.db.InsertCall(&db.Call{CallerID: caller.ID, CalleeID: callee.ID, File: path, Line: siteLine, Column: siteColumn}); err == nil {
+				if err := p.store.InsertCall(&db.Call{CallerID: caller.ID, CalleeID: callee.ID, File: path, Line: siteLine, Column: siteColumn}); err == nil {
 					stored++
 				}
 			}

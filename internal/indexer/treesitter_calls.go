@@ -11,14 +11,14 @@ import (
 
 // CallExtractor extracts call relationships using tree-sitter
 type CallExtractor struct {
-	db       *db.Manager
+	store    graphStore
 	rootPath string
 }
 
 // NewCallExtractor creates a new call extractor
-func NewCallExtractor(dbManager *db.Manager, rootPath string) *CallExtractor {
+func NewCallExtractor(store graphStore, rootPath string) *CallExtractor {
 	return &CallExtractor{
-		db:       dbManager,
+		store:    store,
 		rootPath: rootPath,
 	}
 }
@@ -183,7 +183,7 @@ func (c *CallExtractor) ExtractCalls(ctx context.Context, file FileInfo) (int, e
 	}
 	defer tree.Close()
 
-	symbols, err := loadFileSymbols(c.db, file.Path)
+	symbols, err := loadFileSymbols(c.store, file.Path)
 	if err != nil {
 		return 0, fmt.Errorf("failed to load file symbols: %w", err)
 	}
@@ -212,7 +212,7 @@ func (c *CallExtractor) ExtractCalls(ctx context.Context, file FileInfo) (int, e
 		if object != nil && provesOwner(object, n, file.Language, content) {
 			at.owner = caller.Scope
 		}
-		target, err := resolveTarget(c.db, site.TargetName, callableKinds, at)
+		target, err := resolveTarget(c.store, site.TargetName, callableKinds, at)
 		if err != nil {
 			resolveErr = err
 			return
@@ -236,14 +236,14 @@ func (c *CallExtractor) ExtractCalls(ctx context.Context, file FileInfo) (int, e
 
 	count := 0
 	for _, call := range calls {
-		if err := c.db.InsertCall(call); err != nil {
+		if err := c.store.InsertCall(call); err != nil {
 			// Skip duplicates
 			continue
 		}
 		count++
 	}
 	for _, site := range unresolved {
-		if err := c.db.InsertUnresolved(site); err != nil {
+		if err := c.store.InsertUnresolved(site); err != nil {
 			return count, fmt.Errorf("failed to record unresolved call: %w", err)
 		}
 	}

@@ -2,10 +2,14 @@ package indexer
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -108,20 +112,71 @@ func NewIndexer(cfg *config.Config, dbManager *db.Manager, rootPath string) *Ind
 func (i *Indexer) SetProgressWriter(w io.Writer) { i.progress = w }
 
 // IndexProject indexes all source files in the project. Cancellation stops
-// it between files and requests and returns the context error.
+// it between files and requests and returns the context error. Extraction
+// builds an in-memory candidate; the published graph changes only when
+// the final RefreshPlan publishes atomically (R05), so a failed or
+// cancelled attempt leaves the previous snapshot intact.
 func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool) error {
 	i.phaseDiagnostics = nil
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	cand := newCandidate()
+	store := &refreshStore{published: i.db, candidate: cand}
+
+	// An explicit rebuild may replace a graph held in another index format;
+	// the replacement itself runs inside the publication transaction, so a
+	// failed rebuild leaves the legacy snapshot intact (R05, T23).
+	resetFormat := false
 	if force {
-		if err := i.db.ClearAll(); err != nil {
-			return fmt.Errorf("failed to clear database: %w", err)
+		if err := i.db.CheckFormat(); err != nil {
+			var incompatible *db.IncompatibleFormatError
+			if !errors.As(err, &incompatible) {
+				return fmt.Errorf("failed to validate index format: %w", err)
+			}
+			resetFormat = true
 		}
 	}
 
+	// The published manifest decides what the refresh removes: files the
+	// scan no longer returns (deleted, renamed, moved, newly ignored),
+	// down to a language with no files left and an entirely empty tree
+	// (R01).
+	published, err := i.db.ListFileMeta()
+	if err != nil {
+		return fmt.Errorf("failed to read published manifest: %w", err)
+	}
+	scanSet := make(map[string]bool, len(files))
+	scanLang := make(map[string]string, len(files))
+	for _, file := range files {
+		scanSet[file.Path] = true
+		scanLang[file.Path] = file.Language
+	}
+	oldLang := make(map[string]string, len(published))
+	for _, meta := range published {
+		oldLang[meta.Path] = meta.Language
+	}
+	storedDigests, err := i.db.GetProviderDigests()
+	if err != nil {
+		return fmt.Errorf("failed to read provider state: %w", err)
+	}
+	var removed []string
+	for _, meta := range published {
+		if !scanSet[meta.Path] {
+			removed = append(removed, meta.Path)
+		}
+	}
+	sort.Strings(removed)
+
 	// Group files by language
 	groups := GroupByLanguage(files)
+	// changedPaths are the files this attempt re-extracts; their old and
+	// new languages end up dirty.
+	changedPaths := map[string]bool{}
+	// digests are this attempt's provider identity per language.
+	digests := map[string]string{}
+	// digestChanged marks languages whose provider identity moved.
+	digestChanged := map[string]bool{}
 
 	indexedFiles := 0
 	skippedFiles := 0
@@ -142,14 +197,31 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 		}
 		settled := false
 		var symbolFailures requestFailures
+		// The provider identity of this attempt: format version, resolved
+		// server and live capabilities (R02).
+		digest := providerDigest(language, i.lsp, client)
+		digests[language] = digest
+		providerInvalidated := storedDigests[language] != digest
+		digestChanged[language] = providerInvalidated
+		provider := "tree-sitter"
+		if client != nil {
+			provider = "lsp"
+		}
 
 		for idx, file := range langFiles {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			// Check if file needs re-indexing (incremental build)
-			if !force {
-				if skip, _ := i.shouldSkipFile(file); skip {
+			// The refresh decision: skip only when the fingerprint, the
+			// recorded provider and the language's provider identity all
+			// still hold. mtime can prove a change, never an absence of
+			// one (R02).
+			if !force && !providerInvalidated {
+				skip, err := i.refreshDecision(file, provider)
+				if err != nil {
+					return err
+				}
+				if skip {
 					langSkipped++
 					skippedFiles++
 					continue
@@ -160,54 +232,57 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 			progress := float64(idx+1) / float64(langTotal) * 100
 			fmt.Fprintf(i.progress, "\r   [%s] %d/%d files (%.0f%%) ", language, idx+1, langTotal, progress)
 
-			symbols := 0
-			var err error
-
-			if client != nil {
-				// Settle only once a live server has files to index.
-				if !settled {
-					if err := waitForServerSettle(ctx, language); err != nil {
-						return err
+			// Extract against stable bytes: a source mutating mid-extraction
+			// is retried boundedly and never published as fresh (T05).
+			var symbols int
+			var source string
+			stableErr := withStableSource(file.Path, stableSourceAttempts, func(content []byte, hash string, mtime time.Time) (bool, error) {
+				if client != nil {
+					// Settle only once a live server has files to index.
+					if !settled {
+						if err := waitForServerSettle(ctx, language); err != nil {
+							return false, err
+						}
+						settled = true
 					}
-					settled = true
-				}
-				symbols, err = i.indexFile(ctx, client, file)
-				if err != nil {
-					if ctxErr := ctx.Err(); ctxErr != nil {
-						return ctxErr
+					count, err := i.indexFile(ctx, store, client, file, content, hash, mtime)
+					if err != nil {
+						if ctxErr := ctx.Err(); ctxErr != nil {
+							return false, ctxErr
+						}
+						symbolFailures.add(client, err)
+					} else if count > 0 {
+						symbols, source = count, "lsp"
+						return true, nil
 					}
-					symbolFailures.add(client, err)
 				}
-			} else {
-				// No LSP client, force fallback
-				err = fmt.Errorf("no LSP client")
-			}
-
-			// Fallback if error OR if LSP returned 0 symbols (likely failed to process)
-			if err != nil || symbols == 0 {
-				// Try tree-sitter fallback
-				tsIndexer := NewTreeSitterIndexer(i.db, i.rootPath)
-				tsSymbols, tsErr := tsIndexer.IndexFile(ctx, file)
+				tsSymbols, tsErr := NewTreeSitterIndexer(store, i.rootPath).IndexFileContent(ctx, file, content, hash, mtime)
 				if tsErr != nil {
 					if err != nil {
 						fmt.Fprintf(i.progress, "\n   ⚠️  Error indexing %s: %v (tree-sitter: %v)\n", file.RelPath, err, tsErr)
 					}
-					// If LSP managed 0 and tree-sitter failed, we just continue (count as 0)
-					continue
+					return false, nil
 				}
-
-				// Tree-sitter succeeded
-				langIndexed++
-				langTreeSitter++
-				indexedFiles++
-				totalSymbols += tsSymbols
+				symbols, source = tsSymbols, "tree-sitter"
+				return true, nil
+			})
+			if stableErr != nil {
+				return stableErr
+			}
+			if symbols == 0 {
+				// Neither provider produced anything; the file stays
+				// changed for the next refresh.
 				continue
 			}
-
+			changedPaths[file.Path] = true
 			langIndexed++
-			langLSP++
 			indexedFiles++
 			totalSymbols += symbols
+			if source == "lsp" {
+				langLSP++
+			} else {
+				langTreeSitter++
+			}
 		}
 
 		// Clear progress line and show summary with source counts
@@ -219,12 +294,42 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 		i.recordRequestFailures("symbols", language, symbolFailures)
 	}
 
-	// Index call graph for each language
+	// A language is dirty when any of its files was added, changed or
+	// removed — under its old or new language — or its provider identity
+	// moved; only dirty languages re-extract their edge sets, the others'
+	// are already equivalent to a full rebuild's (R01, R02).
+	dirty := map[string]bool{}
+	for _, meta := range published {
+		if !scanSet[meta.Path] {
+			dirty[meta.Language] = true
+		}
+	}
+	for path := range changedPaths {
+		dirty[scanLang[path]] = true
+		if old, ok := oldLang[path]; ok {
+			dirty[old] = true
+		}
+	}
+	for language, changed := range digestChanged {
+		if changed {
+			dirty[language] = true
+		}
+	}
+	dirtyLanguages := make([]string, 0, len(dirty))
+	for language := range dirty {
+		dirtyLanguages = append(dirtyLanguages, language)
+	}
+	sort.Strings(dirtyLanguages)
+
+	// Index call graph for each dirty language
 	fmt.Fprintln(i.progress, "📊 Extracting call graph (via references)...")
-	callGraphIndexer := NewCallGraphIndexer(i.db, i.lsp, i.rootPath)
-	callExtractor := NewCallExtractor(i.db, i.rootPath)
+	callGraphIndexer := NewCallGraphIndexer(store, i.lsp, i.rootPath)
+	callExtractor := NewCallExtractor(store, i.rootPath)
 	totalCalls := 0
 	for language := range groups {
+		if !dirty[language] {
+			continue
+		}
 		// Try LSP-based call graph first
 		calls, err := callGraphIndexer.IndexCallGraph(ctx, language)
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -249,13 +354,16 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 	}
 	fmt.Fprintf(i.progress, "   Found %d call relationships\n", totalCalls)
 
-	// Index type hierarchy for each language
+	// Index type hierarchy for each dirty language
 	fmt.Fprintln(i.progress, "🔗 Extracting type hierarchy...")
-	hierarchyIndexer := NewHierarchyIndexer(i.db, i.lsp, i.rootPath)
+	hierarchyIndexer := NewHierarchyIndexer(store, i.lsp, i.rootPath)
 	totalHierarchy := 0
 
 	// Try LSP-based hierarchy first, fall back to tree-sitter if no results
 	for language := range groups {
+		if !dirty[language] {
+			continue
+		}
 		count, err := hierarchyIndexer.IndexHierarchyLSP(ctx, language)
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
@@ -274,6 +382,17 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 		totalHierarchy += count
 	}
 	fmt.Fprintf(i.progress, "   Found %d type relationships\n", totalHierarchy)
+
+	// Publish the candidate: the dirty languages' edge sets were
+	// re-extracted this attempt, and the removed files disappear with it.
+	// The publication is one transaction — before it, the published graph
+	// is untouched.
+	plan := cand.plan(removed, dirtyLanguages)
+	plan.ProviderState = digests
+	plan.ResetFormat = resetFormat
+	if err := i.db.Publish(ctx, plan); err != nil {
+		return fmt.Errorf("failed to publish graph: %w", err)
+	}
 
 	// Preserve one diagnostic per language for the build boundary, then the
 	// phase failures, then any server that had to be killed.
@@ -305,40 +424,116 @@ func (i *Indexer) Diagnostics() []lsp.LSPDiagnostic {
 	return append([]lsp.LSPDiagnostic(nil), i.diagnostics...)
 }
 
-// shouldSkipFile checks if file is unchanged since last index
-func (i *Indexer) shouldSkipFile(file FileInfo) (bool, error) {
-	// Get file's current modification time
+// stableSourceAttempts bounds how often a mutating source is retried
+// during one file's extraction before the attempt fails (T05).
+const stableSourceAttempts = 3
+
+// fingerprint is the content identity a refresh compares: the hex SHA-256
+// of the indexed bytes (R02).
+func fingerprint(content []byte) string {
+	sum := sha256.Sum256(content)
+	return hex.EncodeToString(sum[:])
+}
+
+// providerDigest fingerprints what extraction under language depends on:
+// the index format's identity version, the resolved server command and
+// arguments (recorded even when its startup failed), and — when a server
+// is live — the capabilities that shape extraction (R02).
+func providerDigest(language string, mgr *lsp.Manager, client *lsp.Client) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "format=%d", db.FormatVersion)
+	if command, args, ok := mgr.Server(language); ok {
+		fmt.Fprintf(h, ";command=%s;args=%v", command, args)
+	} else {
+		fmt.Fprintf(h, ";command=<none>")
+	}
+	if client != nil {
+		caps := client.Capabilities()
+		fmt.Fprintf(h, ";callHierarchy=%t;typeHierarchy=%t",
+			lsp.Supports(caps.CallHierarchyProvider), lsp.Supports(caps.TypeHierarchyProvider))
+	} else {
+		fmt.Fprintf(h, ";provider=tree-sitter")
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// refreshDecision reports whether the refresh may skip file under the
+// provider that would extract it now. A file is skippable only when the
+// recorded fingerprint and provider still hold: mtime can shortcut a
+// change, never an absence of one (R02).
+func (i *Indexer) refreshDecision(file FileInfo, provider string) (bool, error) {
 	stat, err := os.Stat(file.Path)
 	if err != nil {
 		return false, err
 	}
-	currentMtime := stat.ModTime()
-
-	// Get stored metadata
 	meta, err := i.db.GetFileMeta(file.Path)
 	if err != nil {
 		return false, err
 	}
-
-	// If no metadata, file hasn't been indexed before
-	if meta == nil {
+	if meta == nil || meta.Provider != provider {
 		return false, nil
 	}
+	if stat.ModTime().After(meta.ModTime) {
+		return false, nil
+	}
+	content, err := os.ReadFile(file.Path)
+	if err != nil {
+		return false, err
+	}
+	return fingerprint(content) == meta.ContentHash, nil
+}
 
-	// Skip if file hasn't changed
-	return !currentMtime.After(meta.ModTime), nil
+// withStableSource runs extract against the current bytes of path and
+// verifies the source did not change while it ran. A mutating source is
+// retried with the fresh bytes, bounded by attempts; past the bound the
+// error names the file — inconsistent analyzed bytes are never published
+// as a fresh snapshot (T05).
+func withStableSource(path string, attempts int, extract func(content []byte, hash string, mtime time.Time) (bool, error)) error {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	hash := fingerprint(content)
+	mtime := sourceModTime(path)
+	for attempt := 1; ; attempt++ {
+		extracted, err := extract(content, hash, mtime)
+		if err != nil {
+			return err
+		}
+		if !extracted {
+			return nil
+		}
+		after, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		afterHash := fingerprint(after)
+		if afterHash == hash {
+			return nil
+		}
+		if attempt >= attempts {
+			return fmt.Errorf("source of %s changed during extraction; not published as fresh", path)
+		}
+		content, hash, mtime = after, afterHash, sourceModTime(path)
+	}
+}
+
+// sourceModTime is the mtime recorded for path, or the zero time when it
+// cannot be stated.
+func sourceModTime(path string) time.Time {
+	if stat, err := os.Stat(path); err == nil {
+		return stat.ModTime()
+	}
+	return time.Time{}
 }
 
 // indexFile indexes a single file and returns number of symbols stored
-func (i *Indexer) indexFile(ctx context.Context, client *lsp.Client, file FileInfo) (int, error) {
+func (i *Indexer) indexFile(ctx context.Context, store graphStore, client *lsp.Client, file FileInfo, content []byte, hash string, mtime time.Time) (int, error) {
+	// A provider attempt starts fresh for this file.
+	store.BeginFile(file.Path)
+
 	// Convert path to URI
 	fileURI := lsp.PathToURI(file.Path)
-
-	// Read file content
-	content, err := os.ReadFile(file.Path)
-	if err != nil {
-		return 0, err
-	}
 	contentStr := string(content)
 
 	// Open document in LSP
@@ -357,13 +552,14 @@ func (i *Indexer) indexFile(ctx context.Context, client *lsp.Client, file FileIn
 	lines := lsp.NewSourceLines()
 	lines.Set(file.Path, contentStr)
 	doc := &lspDocument{file: file, enc: client.PositionEncoding(), lines: lines, ids: idAllocator{}}
-	if err := i.storeSymbols(doc, symbols, nil); err != nil {
+	if err := i.storeSymbols(store, doc, symbols, nil); err != nil {
 		return 0, err
 	}
 	count := doc.count
 
-	// Update file metadata
-	if err := i.db.UpdateFileMeta(file.Path, time.Now(), file.Language); err != nil {
+	// Record the refresh metadata: fingerprint, provider, source mtime and
+	// extraction time (R02).
+	if err := store.RecordFileMeta(db.FileMeta{Path: file.Path, ModTime: mtime, Language: file.Language, ContentHash: hash, Provider: "lsp", ExtractedAt: time.Now()}); err != nil {
 		return 0, err
 	}
 
@@ -380,7 +576,7 @@ type lspDocument struct {
 }
 
 // storeSymbols recursively stores symbols in the database
-func (i *Indexer) storeSymbols(doc *lspDocument, symbols []lsp.DocumentSymbol, owners []string) error {
+func (i *Indexer) storeSymbols(store graphStore, doc *lspDocument, symbols []lsp.DocumentSymbol, owners []string) error {
 	file := doc.file
 	for _, sym := range symbols {
 		key := symbolKey{Language: file.Language, RelPath: file.RelPath, Owners: owners, Name: sym.Name}
@@ -411,7 +607,7 @@ func (i *Indexer) storeSymbols(doc *lspDocument, symbols []lsp.DocumentSymbol, o
 			CreatedAt:     time.Now(),
 		}
 
-		if err := i.db.InsertSymbol(dbSym); err != nil {
+		if err := store.InsertSymbol(dbSym); err != nil {
 			return err
 		}
 		doc.count++
@@ -419,7 +615,7 @@ func (i *Indexer) storeSymbols(doc *lspDocument, symbols []lsp.DocumentSymbol, o
 		// Recursively process children
 		if len(sym.Children) > 0 {
 			childOwners := append(append([]string(nil), key.Owners...), key.Name)
-			if err := i.storeSymbols(doc, sym.Children, childOwners); err != nil {
+			if err := i.storeSymbols(store, doc, sym.Children, childOwners); err != nil {
 				return err
 			}
 		}

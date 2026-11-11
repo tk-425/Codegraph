@@ -13,7 +13,7 @@ import (
 
 // HierarchyIndexer extracts type hierarchy relationships
 type HierarchyIndexer struct {
-	db       *db.Manager
+	store    graphStore
 	lsp      *lsp.Manager
 	rootPath string
 	// failures counts failed requests of the latest IndexHierarchyLSP call.
@@ -21,9 +21,9 @@ type HierarchyIndexer struct {
 }
 
 // NewHierarchyIndexer creates a new hierarchy indexer
-func NewHierarchyIndexer(dbManager *db.Manager, lspManager *lsp.Manager, rootPath string) *HierarchyIndexer {
+func NewHierarchyIndexer(store graphStore, lspManager *lsp.Manager, rootPath string) *HierarchyIndexer {
 	return &HierarchyIndexer{
-		db:       dbManager,
+		store:    store,
 		lsp:      lspManager,
 		rootPath: rootPath,
 	}
@@ -37,13 +37,12 @@ func (h *HierarchyIndexer) IndexHierarchyLSP(ctx context.Context, language strin
 		return 0, fmt.Errorf("failed to get LSP client: %w", err)
 	}
 
-	// Clear existing hierarchy for this language
-	if err := h.db.ClearTypeHierarchy(language); err != nil {
-		return 0, fmt.Errorf("failed to clear hierarchy: %w", err)
-	}
+	// The published hierarchy of this language is replaced at publication
+	// (db.Manager.Publish), not here: extraction output is a candidate
+	// until then (R05).
 
 	// Get all class/interface symbols
-	symbols, err := h.db.GetTypeSymbols(language)
+	symbols, err := h.store.GetTypeSymbols(language)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get type symbols: %w", err)
 	}
@@ -53,7 +52,7 @@ func (h *HierarchyIndexer) IndexHierarchyLSP(ctx context.Context, language strin
 	lines := lsp.NewSourceLines()
 	enc := client.PositionEncoding()
 	pass := &hierarchyPass{
-		db:       h.db,
+		store:    h.store,
 		language: language,
 		root:     lsp.NewRoot(h.rootPath),
 		lines:    lines,
@@ -125,7 +124,7 @@ func (h *HierarchyIndexer) IndexHierarchyLSP(ctx context.Context, language strin
 
 // hierarchyPass holds what one hierarchy pass learns about each file.
 type hierarchyPass struct {
-	db       *db.Manager
+	store    graphStore
 	language string
 	root     lsp.Root
 	lines    *lsp.SourceLines
@@ -137,7 +136,7 @@ func (p *hierarchyPass) fileSymbols(path string) (fileSymbols, error) {
 	if symbols, ok := p.symbols[path]; ok {
 		return symbols, nil
 	}
-	symbols, err := loadFileSymbols(p.db, path)
+	symbols, err := loadFileSymbols(p.store, path)
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +178,7 @@ func (p *hierarchyPass) parent(child db.Symbol, item lsp.TypeHierarchyItem) (boo
 	}
 
 	if parent == nil {
-		return false, p.db.InsertUnresolved(&db.Unresolved{
+		return false, p.store.InsertUnresolved(&db.Unresolved{
 			Kind:       relationship,
 			Language:   p.language,
 			FromID:     child.ID,
@@ -190,7 +189,7 @@ func (p *hierarchyPass) parent(child db.Symbol, item lsp.TypeHierarchyItem) (boo
 			Reason:     reason,
 		})
 	}
-	err := p.db.InsertTypeHierarchy(&db.TypeHierarchy{
+	err := p.store.InsertTypeHierarchy(&db.TypeHierarchy{
 		ChildID:      child.ID,
 		ParentID:     parent.ID,
 		Relationship: relationship,
@@ -227,33 +226,33 @@ func (h *HierarchyIndexer) IndexHierarchyTreeSitter(ctx context.Context, file Fi
 	count := 0
 	for _, rel := range relationships {
 		site := &db.Unresolved{Kind: rel.Relationship, Language: file.Language, File: file.Path}
-		child, err := resolveTarget(h.db, rel.ChildID, typeKinds, at)
+		child, err := resolveTarget(h.store, rel.ChildID, typeKinds, at)
 		if err != nil {
 			return count, fmt.Errorf("failed to resolve %s: %w", rel.ChildID, err)
 		}
 		if child.symbol == nil {
 			site.TargetName, site.Reason, site.Candidates = rel.ChildID, child.reason, child.candidates
-			if err := h.db.InsertUnresolved(site); err != nil {
+			if err := h.store.InsertUnresolved(site); err != nil {
 				return count, err
 			}
 			continue
 		}
 		site.FromID, site.Line, site.Column = child.symbol.ID, child.symbol.Line, child.symbol.Column
 
-		parent, err := resolveTarget(h.db, rel.ParentID, typeKinds, at)
+		parent, err := resolveTarget(h.store, rel.ParentID, typeKinds, at)
 		if err != nil {
 			return count, fmt.Errorf("failed to resolve %s: %w", rel.ParentID, err)
 		}
 		if parent.symbol == nil {
 			site.TargetName, site.Reason, site.Candidates = rel.ParentID, parent.reason, parent.candidates
-			if err := h.db.InsertUnresolved(site); err != nil {
+			if err := h.store.InsertUnresolved(site); err != nil {
 				return count, err
 			}
 			continue
 		}
 		rel.ChildID, rel.ParentID = child.symbol.ID, parent.symbol.ID
 
-		if err := h.db.InsertTypeHierarchy(rel); err != nil {
+		if err := h.store.InsertTypeHierarchy(rel); err != nil {
 			continue
 		}
 		count++
