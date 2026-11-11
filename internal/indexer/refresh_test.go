@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -211,5 +212,124 @@ func TestRefreshRemovesLanguageAndEmptyTree(t *testing.T) {
 	}
 	if unresolved, err := p.database.GetUnresolved(); err != nil || len(unresolved) != 0 {
 		t.Errorf("T04: empty tree left unresolved rows: %+v, %v", unresolved, err)
+	}
+}
+
+const goWithOrphan = `package main
+
+func Target() {}
+
+func Caller() { Target() }
+
+func Orphan() {}
+`
+
+// T07: a change in the effective provider configuration invalidates the
+// affected language's extraction. The oracle is a tampered published row:
+// it only comes back when the refresh re-extracts.
+func TestProviderConfigChangeReextracts(t *testing.T) {
+	p := newRefreshProject(t)
+	p.write(t, "source.go", goWithOrphan)
+	if err := p.build(t, true); err != nil {
+		t.Fatal(err)
+	}
+	orphan := p.symbols(t, "Orphan")
+	if len(orphan) != 1 {
+		t.Fatalf("fixture did not publish Orphan: %+v", orphan)
+	}
+
+	// Tamper: a published row the next refresh keeps unless it re-extracts.
+	if err := p.database.InsertSymbol(&db.Symbol{
+		ID: "go:source.go#Deleted", Name: "Deleted", Kind: "function", File: orphan[0].File,
+		Line: 20, Column: 0, Language: "go", Source: "tree-sitter", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Unchanged provider: the refresh skips the file and the tampered row
+	// stays, proving no re-extraction happened.
+	if err := p.build(t, false); err != nil {
+		t.Fatal(err)
+	}
+	if symbols := p.symbols(t, "Deleted"); len(symbols) != 1 {
+		t.Fatalf("control: unchanged provider re-extracted anyway: %+v", symbols)
+	}
+
+	// A different effective server command changes the provider digest.
+	p.cfg.LSP["go"] = config.LSPConfig{Command: filepath.Join(p.root, "another-unavailable-lsp")}
+	if err := p.build(t, false); err != nil {
+		t.Fatal(err)
+	}
+	if symbols := p.symbols(t, "Deleted"); len(symbols) != 0 {
+		t.Errorf("T07: changed provider configuration did not re-extract: %+v", symbols)
+	}
+	if symbols := p.symbols(t, "Orphan"); len(symbols) != 1 {
+		t.Errorf("T07: re-extraction lost Orphan: %+v", symbols)
+	}
+}
+
+// T08: a server that has become available upgrades unchanged files stuck
+// on fallback data instead of skipping them forever.
+func TestLSPRestoredUpgradesFallbackSymbols(t *testing.T) {
+	p := newRefreshProject(t)
+	p.write(t, "source.go", goCallerCallee)
+	if err := p.build(t, true); err != nil {
+		t.Fatal(err)
+	}
+	if symbols := p.symbols(t, "Target"); len(symbols) != 1 || symbols[0].Source != "tree-sitter" {
+		t.Fatalf("fixture did not extract with fallback: %+v", symbols)
+	}
+
+	useScriptedServer(t, p.cfg, "go", "mixed-symbols.json")
+	if err := p.build(t, false); err != nil {
+		t.Fatal(err)
+	}
+	symbols := p.symbols(t, "Target")
+	if len(symbols) != 1 || symbols[0].Source != "lsp" {
+		t.Errorf("T08: fallback data not upgraded to the live provider: %+v", symbols)
+	}
+	meta, err := p.database.GetFileMeta(filepath.Join(p.root, "source.go"))
+	if err != nil || meta == nil || meta.Provider != "lsp" {
+		t.Errorf("T08: recorded provider not upgraded: %+v, %v", meta, err)
+	}
+}
+
+// T05: a source that mutates while it is being extracted is retried with
+// fresh bytes, and a source that never stops mutating fails the attempt
+// naming the file instead of publishing mixed bytes.
+func TestWithStableSourceRetriesAndFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "moving.go")
+	if err := os.WriteFile(path, []byte("// v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mutations := 1 // the first extraction rewrites the file under itself
+	var seen []string
+	if err := withStableSource(path, 3, func(content []byte, hash string, mtime time.Time) (bool, error) {
+		seen = append(seen, hash)
+		if mutations > 0 {
+			mutations--
+			if werr := os.WriteFile(path, []byte("// v2\n"), 0o644); werr != nil {
+				return false, werr
+			}
+		}
+		return true, nil
+	}); err != nil {
+		t.Fatalf("stable retry failed: %v", err)
+	}
+	if len(seen) != 2 || seen[0] == seen[1] {
+		t.Errorf("T05: retry did not use fresh bytes: %d attempts %v", len(seen), seen)
+	}
+
+	if err := os.WriteFile(path, []byte("// base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := withStableSource(path, 3, func(content []byte, hash string, mtime time.Time) (bool, error) {
+		if werr := os.WriteFile(path, append(append([]byte{}, content...), '-'), 0o644); werr != nil {
+			return false, werr
+		}
+		return true, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "moving.go") {
+		t.Fatalf("T05: never-stable source did not fail naming the file: %v", err)
 	}
 }

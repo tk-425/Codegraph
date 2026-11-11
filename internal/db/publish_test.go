@@ -77,7 +77,7 @@ func TestPublishReplacesChangedFileAndDirtyEdges(t *testing.T) {
 	if err := m.InsertCall(&Call{CallerID: keeper.ID, CalleeID: old.ID, File: "/proj/c.go", Line: 2, Column: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.UpdateFileMeta("/proj/a.go", time.Now(), "go"); err != nil {
+	if err := m.RecordFileMeta(FileMeta{Path: "/proj/a.go", ModTime: time.Now(), Language: "go"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -125,7 +125,7 @@ func TestPublishRemovesFileEntirely(t *testing.T) {
 	if err := m.InsertCall(&Call{CallerID: caller.ID, CalleeID: gone.ID, File: "/proj/b.go", Line: 2, Column: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.UpdateFileMeta("/proj/a.go", time.Now(), "go"); err != nil {
+	if err := m.RecordFileMeta(FileMeta{Path: "/proj/a.go", ModTime: time.Now(), Language: "go"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -231,5 +231,46 @@ func TestInitializeRepairsCallsUniqueness(t *testing.T) {
 	}
 	if stats.CallCount != 1 {
 		t.Errorf("duplicate row accumulated after repair: %d, want 1", stats.CallCount)
+	}
+}
+
+// SC7: a format-2 database created before the fingerprint columns is
+// extended in place by the build path — no format bump, no rebuild — and
+// the columns older binaries name still accept their narrower writes.
+func TestInitializeExtendsFormat2FileMeta(t *testing.T) {
+	m := newTestManager(t)
+
+	// Recreate the v0.8.x shape of file_meta.
+	if _, err := m.db.Exec(`DROP TABLE file_meta`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.db.Exec(`CREATE TABLE file_meta (path TEXT PRIMARY KEY, mod_time TIMESTAMP NOT NULL, language TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.db.Exec(`INSERT INTO file_meta (path, mod_time, language) VALUES ('a.go', 1000, 'go')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.db.Exec(`DROP TABLE provider_state`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.Initialize(); err != nil {
+		t.Fatal(err)
+	}
+	var version int
+	if err := m.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != FormatVersion {
+		t.Fatalf("format version = %d, err=%v; want %d (no bump)", version, err, FormatVersion)
+	}
+	// The pre-existing row survives with an empty hash, which never skips.
+	meta, err := m.GetFileMeta("a.go")
+	if err != nil || meta == nil || meta.ContentHash != "" {
+		t.Fatalf("extended row = %+v, %v; want empty hash", meta, err)
+	}
+	// An older binary's narrower write still fits the extended table.
+	if _, err := m.db.Exec(`INSERT INTO file_meta (path, mod_time, language) VALUES ('b.go', 2000, 'go')`); err != nil {
+		t.Fatalf("pre-extension statement rejected: %v", err)
+	}
+	if _, err := m.db.Exec(`INSERT OR REPLACE INTO provider_state (language, digest) VALUES ('go', 'd')`); err != nil {
+		t.Fatalf("provider_state not created: %v", err)
 	}
 }

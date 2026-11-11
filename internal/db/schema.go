@@ -70,7 +70,20 @@ CREATE TABLE IF NOT EXISTS unresolved_relationships (
 CREATE TABLE IF NOT EXISTS file_meta (
     path TEXT PRIMARY KEY,
     mod_time TIMESTAMP NOT NULL,
-    language TEXT NOT NULL
+    language TEXT NOT NULL,
+    content_hash TEXT NOT NULL DEFAULT '',
+    provider TEXT NOT NULL DEFAULT '',
+    extracted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);`
+
+	// CreateProviderStateTable stores, per language, the digest of the
+	// provider configuration and capabilities a snapshot was extracted
+	// with. A change invalidates that language's extraction (R02).
+	CreateProviderStateTable = `
+CREATE TABLE IF NOT EXISTS provider_state (
+    language TEXT PRIMARY KEY,
+    digest TEXT NOT NULL,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );`
 
 	// Indexes for faster queries
@@ -106,7 +119,20 @@ func AllSchemaStatements() []string {
 		CreateTypeHierarchyTable,
 		CreateUnresolvedTable,
 		CreateFileMetaTable,
+		CreateProviderStateTable,
 		CreateIndexes,
 		RepairCallsUniqueness,
 	}
+}
+
+// fileMetaColumns are the columns a format-2 database can be missing; they
+// arrive additively, never by a format bump. Rows that predate a column
+// keep its default, and an empty content hash never skips a file.
+var fileMetaColumns = []string{
+	"content_hash TEXT NOT NULL DEFAULT ''",
+	"provider TEXT NOT NULL DEFAULT ''",
+	// ALTER TABLE cannot add a column with CURRENT_TIMESTAMP (a non-constant
+	// default), so migration stamps the epoch; new rows always write a real
+	// extraction time explicitly.
+	"extracted_at TIMESTAMP NOT NULL DEFAULT '1970-01-01 00:00:00'",
 }

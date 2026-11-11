@@ -73,7 +73,9 @@ func OpenReadOnly(dbPath string) (*Manager, error) {
 }
 
 // Initialize creates all tables and indexes. A database created here is
-// stamped with the current FormatVersion.
+// stamped with the current FormatVersion, and a format-2 database created
+// before the file_meta fingerprint columns gets them added additively
+// (never by a format bump; queries never run this, only the build path).
 func (m *Manager) Initialize() error {
 	var existing int
 	if err := m.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'symbols'`).Scan(&existing); err != nil {
@@ -84,9 +86,47 @@ func (m *Manager) Initialize() error {
 			return fmt.Errorf("failed to execute schema statement: %w", err)
 		}
 	}
+	if err := m.addMissingFileMetaColumns(); err != nil {
+		return err
+	}
 	if existing == 0 {
 		if _, err := m.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", FormatVersion)); err != nil {
 			return fmt.Errorf("failed to stamp format version: %w", err)
+		}
+	}
+	return nil
+}
+
+// addMissingFileMetaColumns inspects file_meta and adds any fingerprint
+// column an older format-2 database lacks.
+func (m *Manager) addMissingFileMetaColumns() error {
+	rows, err := m.db.Query(`PRAGMA table_info(file_meta)`)
+	if err != nil {
+		return fmt.Errorf("failed to inspect file_meta: %w", err)
+	}
+	defer rows.Close()
+	present := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull int
+		var dfltValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &dfltValue, &pk); err != nil {
+			return err
+		}
+		present[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, column := range fileMetaColumns {
+		name, _, _ := strings.Cut(column, " ")
+		if present[name] {
+			continue
+		}
+		if _, err := m.db.Exec("ALTER TABLE file_meta ADD COLUMN " + column); err != nil {
+			return fmt.Errorf("failed to extend file_meta with %s: %w", name, err)
 		}
 	}
 	return nil
@@ -504,12 +544,13 @@ func (m *Manager) GetSymbolByName(name string, languages []string) ([]Symbol, er
 
 // GetStats is defined below with Stats struct
 
-// UpdateFileMeta updates file metadata for incremental builds
-func (m *Manager) UpdateFileMeta(path string, modTime time.Time, language string) error {
+// RecordFileMeta upserts one file's refresh metadata: fingerprint,
+// provider, source mtime and extraction time (R02).
+func (m *Manager) RecordFileMeta(meta FileMeta) error {
 	_, err := m.db.Exec(`
-		INSERT OR REPLACE INTO file_meta (path, mod_time, language)
-		VALUES (?, ?, ?)`,
-		path, modTime, language,
+		INSERT OR REPLACE INTO file_meta (path, mod_time, language, content_hash, provider, extracted_at)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		meta.Path, meta.ModTime, meta.Language, meta.ContentHash, meta.Provider, meta.ExtractedAt,
 	)
 	return err
 }
@@ -517,7 +558,7 @@ func (m *Manager) UpdateFileMeta(path string, modTime time.Time, language string
 // ListFileMeta returns the published manifest: every indexed file with
 // its language. It is what a refresh reconciles the current scan against.
 func (m *Manager) ListFileMeta() ([]FileMeta, error) {
-	rows, err := m.db.Query("SELECT path, mod_time, language FROM file_meta")
+	rows, err := m.db.Query("SELECT path, mod_time, language, content_hash, provider, extracted_at FROM file_meta")
 	if err != nil {
 		return nil, err
 	}
@@ -525,7 +566,7 @@ func (m *Manager) ListFileMeta() ([]FileMeta, error) {
 	var manifest []FileMeta
 	for rows.Next() {
 		var meta FileMeta
-		if err := rows.Scan(&meta.Path, &meta.ModTime, &meta.Language); err != nil {
+		if err := rows.Scan(&meta.Path, &meta.ModTime, &meta.Language, &meta.ContentHash, &meta.Provider, &meta.ExtractedAt); err != nil {
 			return nil, err
 		}
 		manifest = append(manifest, meta)
@@ -533,13 +574,32 @@ func (m *Manager) ListFileMeta() ([]FileMeta, error) {
 	return manifest, rows.Err()
 }
 
+// GetProviderDigests returns the stored provider digest per language: the
+// configuration a snapshot was last extracted under.
+func (m *Manager) GetProviderDigests() (map[string]string, error) {
+	rows, err := m.db.Query("SELECT language, digest FROM provider_state")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	digests := map[string]string{}
+	for rows.Next() {
+		var language, digest string
+		if err := rows.Scan(&language, &digest); err != nil {
+			return nil, err
+		}
+		digests[language] = digest
+	}
+	return digests, rows.Err()
+}
+
 // GetFileMeta gets file metadata
 func (m *Manager) GetFileMeta(path string) (*FileMeta, error) {
 	var fm FileMeta
 	err := m.db.QueryRow(
-		"SELECT path, mod_time, language FROM file_meta WHERE path = ?",
+		"SELECT path, mod_time, language, content_hash, provider, extracted_at FROM file_meta WHERE path = ?",
 		path,
-	).Scan(&fm.Path, &fm.ModTime, &fm.Language)
+	).Scan(&fm.Path, &fm.ModTime, &fm.Language, &fm.ContentHash, &fm.Provider, &fm.ExtractedAt)
 
 	if err == sql.ErrNoRows {
 		return nil, nil

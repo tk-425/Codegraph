@@ -29,6 +29,9 @@ type RefreshPlan struct {
 	Unresolved     []*Unresolved
 	// FileMeta is upserted for the files this attempt re-extracted.
 	FileMeta []FileMeta
+	// ProviderState is upserted per language: the digest of the provider
+	// configuration and capabilities the snapshot was extracted under.
+	ProviderState map[string]string
 }
 
 // Publish applies plan in a single transaction on the manager's write
@@ -118,10 +121,18 @@ func (m *Manager) Publish(ctx context.Context, plan *RefreshPlan) error {
 	}
 	for _, meta := range plan.FileMeta {
 		if _, err := tx.ExecContext(ctx, `
-			INSERT OR REPLACE INTO file_meta (path, mod_time, language)
-			VALUES (?, ?, ?)`,
-			meta.Path, meta.ModTime, meta.Language); err != nil {
+			INSERT OR REPLACE INTO file_meta (path, mod_time, language, content_hash, provider, extracted_at)
+			VALUES (?, ?, ?, ?, ?, ?)`,
+			meta.Path, meta.ModTime, meta.Language, meta.ContentHash, meta.Provider, meta.ExtractedAt); err != nil {
 			return fmt.Errorf("failed to publish metadata of %s: %w", meta.Path, err)
+		}
+	}
+	for language, digest := range plan.ProviderState {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT OR REPLACE INTO provider_state (language, digest, updated_at)
+			VALUES (?, ?, CURRENT_TIMESTAMP)`,
+			language, digest); err != nil {
+			return fmt.Errorf("failed to publish provider state of %s: %w", language, err)
 		}
 	}
 

@@ -21,6 +21,9 @@ type Manager struct {
 	// unavailable caches a startup or transport failure for the rest of this
 	// manager's build attempt, so later phases do not restart the server.
 	unavailable map[string]error
+	// servers records the server each GetClient resolution selected, even
+	// when its startup then failed: the effective provider identity.
+	servers map[string]typeScriptServer
 }
 
 const nativeTypeScriptMaxAttempts = 3
@@ -46,7 +49,22 @@ func NewManager(cfg *config.Config, rootURI string) *Manager {
 		clients:     make(map[string]*Client),
 		diagnostics: make(map[string]LSPDiagnostic),
 		unavailable: make(map[string]error),
+		servers:     make(map[string]typeScriptServer),
 	}
+}
+
+// Server reports the server a GetClient resolution selected for language:
+// its command, arguments and whether it is a native server. The identity
+// is available even when startup then failed, because the refresh
+// fingerprints the effective provider, not the successful one.
+func (m *Manager) Server(language string) (command string, args []string, resolved bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	server, ok := m.servers[language]
+	if !ok {
+		return "", nil, false
+	}
+	return server.command, server.args, true
 }
 
 // GetClient gets or creates an LSP client for a language
@@ -87,6 +105,9 @@ func (m *Manager) GetClient(ctx context.Context, language string) (*Client, erro
 		}
 		server = resolved
 	}
+	// The effective server identity outlives the startup attempt: the
+	// refresh fingerprints what was selected, succeeded or not.
+	m.servers[language] = server
 
 	attempts := 1
 	if server.native {

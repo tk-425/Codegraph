@@ -3,7 +3,6 @@ package indexer
 import (
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/tk-425/Codegraph/internal/db"
 )
@@ -21,7 +20,7 @@ type graphStore interface {
 	InsertCall(*db.Call) error
 	InsertTypeHierarchy(*db.TypeHierarchy) error
 	InsertUnresolved(*db.Unresolved) error
-	UpdateFileMeta(path string, modTime time.Time, language string) error
+	RecordFileMeta(meta db.FileMeta) error
 
 	GetFileSymbols(file string) ([]db.Symbol, error)
 	GetFunctionSymbols(language string) ([]db.Symbol, error)
@@ -81,8 +80,8 @@ func (c *candidate) InsertUnresolved(u *db.Unresolved) error {
 	return nil
 }
 
-func (c *candidate) UpdateFileMeta(path string, modTime time.Time, language string) error {
-	c.meta[path] = db.FileMeta{Path: path, ModTime: modTime, Language: language}
+func (c *candidate) RecordFileMeta(meta db.FileMeta) error {
+	c.meta[meta.Path] = meta
 	return nil
 }
 
@@ -137,8 +136,8 @@ func (s *refreshStore) InsertTypeHierarchy(t *db.TypeHierarchy) error {
 func (s *refreshStore) InsertUnresolved(u *db.Unresolved) error {
 	return s.candidate.InsertUnresolved(u)
 }
-func (s *refreshStore) UpdateFileMeta(path string, modTime time.Time, language string) error {
-	return s.candidate.UpdateFileMeta(path, modTime, language)
+func (s *refreshStore) RecordFileMeta(meta db.FileMeta) error {
+	return s.candidate.RecordFileMeta(meta)
 }
 
 func (s *refreshStore) GetFileSymbols(file string) ([]db.Symbol, error) {

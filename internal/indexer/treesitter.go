@@ -27,6 +27,17 @@ func NewTreeSitterIndexer(store graphStore, rootPath string) *TreeSitterIndexer 
 
 // IndexFile extracts symbols from a file using tree-sitter
 func (t *TreeSitterIndexer) IndexFile(ctx context.Context, file FileInfo) (int, error) {
+	content, err := os.ReadFile(file.Path)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read file: %w", err)
+	}
+	return t.IndexFileContent(ctx, file, content, fingerprint(content), sourceModTime(file.Path))
+}
+
+// IndexFileContent extracts symbols from the given bytes using
+// tree-sitter. content is the stable read the refresh verified (T05); the
+// metadata records its fingerprint and the file's source mtime (R02).
+func (t *TreeSitterIndexer) IndexFileContent(ctx context.Context, file FileInfo, content []byte, hash string, mtime time.Time) (int, error) {
 	// A provider attempt starts fresh for this file, so a fallback replaces
 	// what a failed attempt left instead of appending to it.
 	t.store.BeginFile(file.Path)
@@ -63,8 +74,9 @@ func (t *TreeSitterIndexer) IndexFile(ctx context.Context, file FileInfo) (int, 
 		}
 	}
 
-	// Update file metadata
-	if err := t.store.UpdateFileMeta(file.Path, time.Now(), file.Language); err != nil {
+	// Record the refresh metadata: fingerprint, provider, source mtime and
+	// extraction time (R02).
+	if err := t.store.RecordFileMeta(db.FileMeta{Path: file.Path, ModTime: mtime, Language: file.Language, ContentHash: hash, Provider: "tree-sitter", ExtractedAt: time.Now()}); err != nil {
 		return 0, err
 	}
 
