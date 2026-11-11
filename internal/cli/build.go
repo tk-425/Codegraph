@@ -122,21 +122,20 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	defer dbManager.Close()
 
 	// A graph in another index format is never extended: only an explicitly
-	// requested rebuild replaces it (D06).
-	if err := dbManager.CheckFormat(); err != nil {
+	// requested rebuild replaces it (D06), and the replacement runs inside
+	// the publication transaction so a failed rebuild leaves the legacy
+	// snapshot intact (R05, T23). Initialization is likewise deferred to
+	// that publication — nothing writes a legacy database before it.
+	formatErr := dbManager.CheckFormat()
+	if formatErr != nil {
 		var incompatible *db.IncompatibleFormatError
-		if !errors.As(err, &incompatible) {
-			return withCode("database_init_failed", err)
+		if !errors.As(formatErr, &incompatible) {
+			return withCode("database_init_failed", formatErr)
 		}
 		if !forceFlag {
-			return withCode("index_format_incompatible", err)
+			return withCode("index_format_incompatible", formatErr)
 		}
-		if err := dbManager.ResetFormat(); err != nil {
-			return withCode("database_init_failed", fmt.Errorf("failed to reset index format: %w", err))
-		}
-	}
-
-	if err := dbManager.Initialize(); err != nil {
+	} else if err := dbManager.Initialize(); err != nil {
 		return withCode("database_init_failed", fmt.Errorf("failed to initialize database: %w", err))
 	}
 

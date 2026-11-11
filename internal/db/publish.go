@@ -32,6 +32,11 @@ type RefreshPlan struct {
 	// ProviderState is upserted per language: the digest of the provider
 	// configuration and capabilities the snapshot was extracted under.
 	ProviderState map[string]string
+	// ResetFormat replaces a graph held in an older index format. The
+	// drop, recreate and version stamp run inside the publication
+	// transaction, so a failed publication leaves the legacy snapshot
+	// intact (R05, T23). Only an explicitly requested rebuild sets it.
+	ResetFormat bool
 }
 
 // Publish applies plan in a single transaction on the manager's write
@@ -46,6 +51,25 @@ func (m *Manager) Publish(ctx context.Context, plan *RefreshPlan) error {
 		return fmt.Errorf("failed to begin publication: %w", err)
 	}
 	defer tx.Rollback()
+
+	// A legacy graph is replaced only as part of a successful publication:
+	// drop, recreate and stamp share the transaction, so a failure rolls
+	// the legacy snapshot back whole (R05, T23).
+	if plan.ResetFormat {
+		for _, table := range graphTables {
+			if _, err := tx.ExecContext(ctx, "DROP TABLE IF EXISTS "+table); err != nil {
+				return fmt.Errorf("failed to drop legacy %s: %w", table, err)
+			}
+		}
+		for _, stmt := range AllSchemaStatements() {
+			if _, err := tx.ExecContext(ctx, stmt); err != nil {
+				return fmt.Errorf("failed to recreate schema: %w", err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", FormatVersion)); err != nil {
+			return fmt.Errorf("failed to stamp format version: %w", err)
+		}
+	}
 
 	// Edge sets are deleted through their endpoints, so this must run
 	// before the endpoints' symbol rows are replaced.

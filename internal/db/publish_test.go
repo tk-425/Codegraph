@@ -274,3 +274,53 @@ func TestInitializeExtendsFormat2FileMeta(t *testing.T) {
 		t.Fatalf("provider_state not created: %v", err)
 	}
 }
+
+// T23: resetting a legacy graph happens inside the publication transaction,
+// so a publication that fails partway leaves the legacy data and its
+// version stamp intact.
+func TestPublishResetFormatRollsBackOnFailure(t *testing.T) {
+	m := newTestManager(t)
+	// Turn a healthy database into a legacy one with real content.
+	legacy := seedSymbol(t, m, "go:a.go#Target", "Target", "/proj/a.go", 1)
+	if _, err := m.db.Exec(`PRAGMA user_version = 1`); err != nil {
+		t.Fatal(err)
+	}
+
+	plan := &RefreshPlan{
+		ResetFormat:    true,
+		ChangedFiles:   []string{"/proj/a.go"},
+		DirtyLanguages: []string{"go"},
+		Symbols: []*Symbol{
+			{ID: "go:a.go#Replacement", Name: "Replacement", Kind: "function", File: "/proj/a.go", Line: 1, Language: "go", CreatedAt: time.Now()},
+		},
+		// The failing statement: an edge naming a symbol the plan never
+		// inserted, rejected by foreign keys inside the transaction.
+		Calls: []*Call{{CallerID: "go:a.go#Replacement", CalleeID: "go:missing#Gone", File: "/proj/a.go", Line: 2}},
+	}
+	if err := m.Publish(context.Background(), plan); err == nil {
+		t.Fatal("resetting publish accepted a dangling edge")
+	}
+
+	var version int
+	if err := m.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 1 {
+		t.Fatalf("T23: legacy version after failed reset = %d, err=%v; want 1", version, err)
+	}
+	if symbols, err := m.GetSymbolByName("Target", nil); err != nil || len(symbols) != 1 || symbols[0].ID != legacy.ID {
+		t.Errorf("T23: legacy symbol lost after failed reset: %+v, %v", symbols, err)
+	}
+
+	// A succeeding reset replaces the legacy graph and stamps the version.
+	plan.Calls = nil
+	if err := m.Publish(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != FormatVersion {
+		t.Errorf("T23: version after reset = %d, err=%v; want %d", version, err, FormatVersion)
+	}
+	if symbols, err := m.GetSymbolByName("Target", nil); err != nil || len(symbols) != 0 {
+		t.Errorf("T23: legacy symbol survived a successful reset: %+v, %v", symbols, err)
+	}
+	if symbols, err := m.GetSymbolByName("Replacement", nil); err != nil || len(symbols) != 1 {
+		t.Errorf("T23: replacement missing after reset: %+v, %v", symbols, err)
+	}
+}

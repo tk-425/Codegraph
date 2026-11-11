@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -122,6 +123,20 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 	}
 	cand := newCandidate()
 	store := &refreshStore{published: i.db, candidate: cand}
+
+	// An explicit rebuild may replace a graph held in another index format;
+	// the replacement itself runs inside the publication transaction, so a
+	// failed rebuild leaves the legacy snapshot intact (R05, T23).
+	resetFormat := false
+	if force {
+		if err := i.db.CheckFormat(); err != nil {
+			var incompatible *db.IncompatibleFormatError
+			if !errors.As(err, &incompatible) {
+				return fmt.Errorf("failed to validate index format: %w", err)
+			}
+			resetFormat = true
+		}
+	}
 
 	// The published manifest decides what the refresh removes: files the
 	// scan no longer returns (deleted, renamed, moved, newly ignored),
@@ -374,6 +389,7 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 	// is untouched.
 	plan := cand.plan(removed, dirtyLanguages)
 	plan.ProviderState = digests
+	plan.ResetFormat = resetFormat
 	if err := i.db.Publish(ctx, plan); err != nil {
 		return fmt.Errorf("failed to publish graph: %w", err)
 	}

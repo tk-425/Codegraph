@@ -163,30 +163,9 @@ func (m *Manager) CheckFormat() error {
 	return nil
 }
 
-// ResetFormat drops the graph tables and recreates them in the current
-// format, in one transaction: on failure the previous database is unchanged.
-// Only an explicitly requested rebuild calls it; the graph data is discarded.
-func (m *Manager) ResetFormat() error {
-	tx, err := m.db.Begin()
-	if err != nil {
-		return fmt.Errorf("failed to begin format reset: %w", err)
-	}
-	defer tx.Rollback()
-	for _, table := range graphTables {
-		if _, err := tx.Exec("DROP TABLE IF EXISTS " + table); err != nil {
-			return fmt.Errorf("failed to drop %s: %w", table, err)
-		}
-	}
-	for _, stmt := range AllSchemaStatements() {
-		if _, err := tx.Exec(stmt); err != nil {
-			return fmt.Errorf("failed to execute schema statement: %w", err)
-		}
-	}
-	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", FormatVersion)); err != nil {
-		return fmt.Errorf("failed to stamp format version: %w", err)
-	}
-	return tx.Commit()
-}
+// ResetFormat's drop-recreate-stamp sequence now runs inside a
+// publication transaction (RefreshPlan.ResetFormat) so a failed rebuild
+// cannot erase a legacy snapshot. Only Publish resets.
 
 // Close closes the database connection
 func (m *Manager) Close() error {
@@ -556,9 +535,18 @@ func (m *Manager) RecordFileMeta(meta FileMeta) error {
 }
 
 // ListFileMeta returns the published manifest: every indexed file with
-// its language. It is what a refresh reconciles the current scan against.
+// its language. It is what a refresh reconciles the current scan against,
+// including on a legacy database whose narrower file_meta must still be
+// readable so an explicit rebuild can replace it (R05, T23).
 func (m *Manager) ListFileMeta() ([]FileMeta, error) {
-	rows, err := m.db.Query("SELECT path, mod_time, language, content_hash, provider, extracted_at FROM file_meta")
+	exists, err := m.tableExists("file_meta")
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, nil
+	}
+	rows, err := m.db.Query("SELECT path, mod_time, language FROM file_meta")
 	if err != nil {
 		return nil, err
 	}
@@ -566,7 +554,7 @@ func (m *Manager) ListFileMeta() ([]FileMeta, error) {
 	var manifest []FileMeta
 	for rows.Next() {
 		var meta FileMeta
-		if err := rows.Scan(&meta.Path, &meta.ModTime, &meta.Language, &meta.ContentHash, &meta.Provider, &meta.ExtractedAt); err != nil {
+		if err := rows.Scan(&meta.Path, &meta.ModTime, &meta.Language); err != nil {
 			return nil, err
 		}
 		manifest = append(manifest, meta)
@@ -574,9 +562,26 @@ func (m *Manager) ListFileMeta() ([]FileMeta, error) {
 	return manifest, rows.Err()
 }
 
+// tableExists reports whether name is a table in the database.
+func (m *Manager) tableExists(name string) (bool, error) {
+	var count int
+	if err := m.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, name).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 // GetProviderDigests returns the stored provider digest per language: the
-// configuration a snapshot was last extracted under.
+// configuration a snapshot was last extracted under. A database without
+// the table — a legacy one — has none, so everything re-extracts.
 func (m *Manager) GetProviderDigests() (map[string]string, error) {
+	exists, err := m.tableExists("provider_state")
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return map[string]string{}, nil
+	}
 	rows, err := m.db.Query("SELECT language, digest FROM provider_state")
 	if err != nil {
 		return nil, err

@@ -109,7 +109,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_calls_site ON calls(caller_id, callee_id, 
 )
 
 // graphTables are the tables a format reset drops, children first.
-var graphTables = []string{"calls", "type_hierarchy", "unresolved_relationships", "symbols", "file_meta"}
+var graphTables = []string{"calls", "type_hierarchy", "unresolved_relationships", "symbols", "file_meta", "provider_state"}
 
 // AllSchemaStatements returns all SQL statements needed to create the schema
 func AllSchemaStatements() []string {
