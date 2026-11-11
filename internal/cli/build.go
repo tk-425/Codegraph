@@ -105,15 +105,12 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	}
 
 	languages := indexer.DetectedLanguages(files)
-	if len(languages) == 0 {
-		if jsonOutputFlag {
-			return EmitJSON(cmd.OutOrStdout(), "build", nil, []buildDiagnosticRecord{}, nil)
-		}
-		fmt.Printf("⚠️  %s\n", Warning("No supported source files found"))
-		return nil
-	}
 	if !jsonOutputFlag {
-		fmt.Printf("🔍 Found %s files in %s languages (%s)\n", Info(len(files)), Info(len(languages)), Keyword(strings.Join(languages, ", ")))
+		if len(languages) == 0 {
+			fmt.Printf("⚠️  %s\n", Warning("No supported source files found"))
+		} else {
+			fmt.Printf("🔍 Found %s files in %s languages (%s)\n", Info(len(files)), Info(len(languages)), Keyword(strings.Join(languages, ", ")))
+		}
 	}
 
 	// Open database

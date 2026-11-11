@@ -86,11 +86,12 @@ func (c *candidate) UpdateFileMeta(path string, modTime time.Time, language stri
 	return nil
 }
 
-// plan freezes the candidate into what publication applies. force marks
-// every scanned file as the replacement set; the caller decides that, not
-// the candidate.
-func (c *candidate) plan(dirty []string) *db.RefreshPlan {
+// plan freezes the candidate into what publication applies: the files it
+// re-extracted replace their published symbols, removed files disappear,
+// and the dirty languages' edge sets are the candidate's edges.
+func (c *candidate) plan(removed, dirty []string) *db.RefreshPlan {
 	plan := &db.RefreshPlan{
+		RemovedFiles:   removed,
 		DirtyLanguages: dirty,
 		Calls:          c.calls,
 		TypeHierarchy:  c.hierarchy,

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -119,6 +120,37 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 	}
 	cand := newCandidate()
 	store := &refreshStore{published: i.db, candidate: cand}
+
+	// The published manifest decides what the refresh removes: files the
+	// scan no longer returns (deleted, renamed, moved, newly ignored),
+	// down to a language with no files left and an entirely empty tree
+	// (R01). A published language stays dirty so its edges are replaced
+	// even when its files all change hands or vanish.
+	published, err := i.db.ListFileMeta()
+	if err != nil {
+		return fmt.Errorf("failed to read published manifest: %w", err)
+	}
+	scanSet := make(map[string]bool, len(files))
+	for _, file := range files {
+		scanSet[file.Path] = true
+	}
+	var removed []string
+	dirty := map[string]bool{}
+	for _, language := range DetectedLanguages(files) {
+		dirty[language] = true
+	}
+	for _, meta := range published {
+		dirty[meta.Language] = true
+		if !scanSet[meta.Path] {
+			removed = append(removed, meta.Path)
+		}
+	}
+	sort.Strings(removed)
+	dirtyLanguages := make([]string, 0, len(dirty))
+	for language := range dirty {
+		dirtyLanguages = append(dirtyLanguages, language)
+	}
+	sort.Strings(dirtyLanguages)
 
 	// Group files by language
 	groups := GroupByLanguage(files)
@@ -275,10 +307,11 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 	}
 	fmt.Fprintf(i.progress, "   Found %d type relationships\n", totalHierarchy)
 
-	// Publish the candidate: every language in the scan had its edge set
-	// re-extracted this attempt, so all of them are dirty. The publication
-	// is one transaction — before it, the published graph is untouched.
-	if err := i.db.Publish(ctx, cand.plan(DetectedLanguages(files))); err != nil {
+	// Publish the candidate: the dirty languages' edge sets were
+	// re-extracted this attempt, and the removed files disappear with it.
+	// The publication is one transaction — before it, the published graph
+	// is untouched.
+	if err := i.db.Publish(ctx, cand.plan(removed, dirtyLanguages)); err != nil {
 		return fmt.Errorf("failed to publish graph: %w", err)
 	}
 

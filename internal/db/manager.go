@@ -514,6 +514,25 @@ func (m *Manager) UpdateFileMeta(path string, modTime time.Time, language string
 	return err
 }
 
+// ListFileMeta returns the published manifest: every indexed file with
+// its language. It is what a refresh reconciles the current scan against.
+func (m *Manager) ListFileMeta() ([]FileMeta, error) {
+	rows, err := m.db.Query("SELECT path, mod_time, language FROM file_meta")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var manifest []FileMeta
+	for rows.Next() {
+		var meta FileMeta
+		if err := rows.Scan(&meta.Path, &meta.ModTime, &meta.Language); err != nil {
+			return nil, err
+		}
+		manifest = append(manifest, meta)
+	}
+	return manifest, rows.Err()
+}
+
 // GetFileMeta gets file metadata
 func (m *Manager) GetFileMeta(path string) (*FileMeta, error) {
 	var fm FileMeta
