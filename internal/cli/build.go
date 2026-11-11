@@ -51,12 +51,12 @@ var buildCmd = &cobra.Command{
 		"3. Extracts symbols from all source files\n" +
 		"4. Stores symbols in the database\n\n" +
 		"Edit `.codegraph/.cgignore` and rerun `codegraph build` to change what gets indexed.\n\n" +
-		"Use --force to perform a full rebuild (delete and recreate database).",
+		"Use --force to recompute every file from the current inputs and replace the index atomically.",
 	RunE: runBuild,
 }
 
 func init() {
-	buildCmd.Flags().BoolVar(&forceFlag, "force", false, "Force full rebuild (delete and recreate database)")
+	buildCmd.Flags().BoolVar(&forceFlag, "force", false, "Recompute every file and replace the index atomically")
 	supportJSON(buildCmd)
 	rootCmd.AddCommand(buildCmd)
 }
