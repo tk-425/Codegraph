@@ -18,6 +18,10 @@ type Manager struct {
 	dbPath string
 }
 
+// busyTimeoutMS bounds how long a writer or reader waits on a lock
+// before failing explicitly (T22). A var so tests can shorten it.
+var busyTimeoutMS = 5000
+
 // NewManager creates a new database manager
 func NewManager(dbPath string) (*Manager, error) {
 	// Ensure directory exists
@@ -31,8 +35,11 @@ func NewManager(dbPath string) (*Manager, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 	// Foreign keys are a per-connection setting, so the DSN carries it to
-	// every pooled connection.
-	db, err := sql.Open("sqlite3", fileDSN(absPath, "_foreign_keys=on"))
+	// every pooled connection. Transactions take the write lock at BEGIN
+	// (BEGIN IMMEDIATE), so a second publisher fails within the busy
+	// timeout instead of deadlocking on a deferred upgrade; readers get a
+	// bounded wait for a commit window and never see a mixture (T22).
+	db, err := sql.Open("sqlite3", fileDSN(absPath, fmt.Sprintf("_foreign_keys=on&_busy_timeout=%d&_txlock=immediate", busyTimeoutMS)))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -61,7 +68,7 @@ func OpenReadOnly(dbPath string) (*Manager, error) {
 	if _, err := os.Stat(absPath); err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
-	db, err := sql.Open("sqlite3", fileDSN(absPath, "mode=ro"))
+	db, err := sql.Open("sqlite3", fileDSN(absPath, fmt.Sprintf("mode=ro&_busy_timeout=%d", busyTimeoutMS)))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
