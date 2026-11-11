@@ -153,49 +153,9 @@ func (m *Manager) Close() error {
 	return m.db.Close()
 }
 
-// ClearAll deletes all data (for full rebuild)
-func (m *Manager) ClearAll() error {
-	for _, table := range graphTables {
-		if _, err := m.db.Exec(fmt.Sprintf("DELETE FROM %s", table)); err != nil {
-			return fmt.Errorf("failed to clear %s: %w", table, err)
-		}
-	}
-	return nil
-}
-
-// ClearCalls deletes all calls for a specific language
-func (m *Manager) ClearCalls(language string) error {
-	query := `
-		DELETE FROM calls 
-		WHERE caller_id IN (
-			SELECT id FROM symbols WHERE language = ?
-		)`
-
-	if _, err := m.db.Exec(query, language); err != nil {
-		return fmt.Errorf("failed to clear calls for %s: %w", language, err)
-	}
-	if _, err := m.db.Exec(`DELETE FROM unresolved_relationships WHERE kind = 'call' AND language = ?`, language); err != nil {
-		return fmt.Errorf("failed to clear unresolved calls for %s: %w", language, err)
-	}
-	return nil
-}
-
-// ClearTypeHierarchy deletes all type hierarchy for a specific language
-func (m *Manager) ClearTypeHierarchy(language string) error {
-	query := `
-		DELETE FROM type_hierarchy 
-		WHERE child_id IN (
-			SELECT id FROM symbols WHERE language = ?
-		)`
-
-	if _, err := m.db.Exec(query, language); err != nil {
-		return fmt.Errorf("failed to clear type hierarchy for %s: %w", language, err)
-	}
-	if _, err := m.db.Exec(`DELETE FROM unresolved_relationships WHERE kind != 'call' AND language = ?`, language); err != nil {
-		return fmt.Errorf("failed to clear unresolved type relationships for %s: %w", language, err)
-	}
-	return nil
-}
+// BeginFile is the graphStore hook for a provider attempt starting at a
+// file. The published graph has nothing buffered, so it is a no-op here.
+func (m *Manager) BeginFile(path string) {}
 
 // InsertSymbol inserts a symbol into the database
 func (m *Manager) InsertSymbol(s *Symbol) error {

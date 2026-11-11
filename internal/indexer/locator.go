@@ -71,8 +71,12 @@ var (
 // Relationships are attached through it, never by reconstructing an ID.
 type fileSymbols []db.Symbol
 
-func loadFileSymbols(database *db.Manager, path string) (fileSymbols, error) {
-	return database.GetFileSymbols(path)
+func loadFileSymbols(store graphStore, path string) (fileSymbols, error) {
+	symbols, err := store.GetFileSymbols(path)
+	if err != nil {
+		return nil, err
+	}
+	return fileSymbols(symbols), nil
 }
 
 // named returns the symbol whose name starts exactly at line:column.

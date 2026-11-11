@@ -108,17 +108,17 @@ func NewIndexer(cfg *config.Config, dbManager *db.Manager, rootPath string) *Ind
 func (i *Indexer) SetProgressWriter(w io.Writer) { i.progress = w }
 
 // IndexProject indexes all source files in the project. Cancellation stops
-// it between files and requests and returns the context error.
+// it between files and requests and returns the context error. Extraction
+// builds an in-memory candidate; the published graph changes only when
+// the final RefreshPlan publishes atomically (R05), so a failed or
+// cancelled attempt leaves the previous snapshot intact.
 func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool) error {
 	i.phaseDiagnostics = nil
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if force {
-		if err := i.db.ClearAll(); err != nil {
-			return fmt.Errorf("failed to clear database: %w", err)
-		}
-	}
+	cand := newCandidate()
+	store := &refreshStore{published: i.db, candidate: cand}
 
 	// Group files by language
 	groups := GroupByLanguage(files)
@@ -171,7 +171,7 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 					}
 					settled = true
 				}
-				symbols, err = i.indexFile(ctx, client, file)
+				symbols, err = i.indexFile(ctx, store, client, file)
 				if err != nil {
 					if ctxErr := ctx.Err(); ctxErr != nil {
 						return ctxErr
@@ -186,7 +186,7 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 			// Fallback if error OR if LSP returned 0 symbols (likely failed to process)
 			if err != nil || symbols == 0 {
 				// Try tree-sitter fallback
-				tsIndexer := NewTreeSitterIndexer(i.db, i.rootPath)
+				tsIndexer := NewTreeSitterIndexer(store, i.rootPath)
 				tsSymbols, tsErr := tsIndexer.IndexFile(ctx, file)
 				if tsErr != nil {
 					if err != nil {
@@ -221,8 +221,8 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 
 	// Index call graph for each language
 	fmt.Fprintln(i.progress, "📊 Extracting call graph (via references)...")
-	callGraphIndexer := NewCallGraphIndexer(i.db, i.lsp, i.rootPath)
-	callExtractor := NewCallExtractor(i.db, i.rootPath)
+	callGraphIndexer := NewCallGraphIndexer(store, i.lsp, i.rootPath)
+	callExtractor := NewCallExtractor(store, i.rootPath)
 	totalCalls := 0
 	for language := range groups {
 		// Try LSP-based call graph first
@@ -251,7 +251,7 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 
 	// Index type hierarchy for each language
 	fmt.Fprintln(i.progress, "🔗 Extracting type hierarchy...")
-	hierarchyIndexer := NewHierarchyIndexer(i.db, i.lsp, i.rootPath)
+	hierarchyIndexer := NewHierarchyIndexer(store, i.lsp, i.rootPath)
 	totalHierarchy := 0
 
 	// Try LSP-based hierarchy first, fall back to tree-sitter if no results
@@ -274,6 +274,13 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 		totalHierarchy += count
 	}
 	fmt.Fprintf(i.progress, "   Found %d type relationships\n", totalHierarchy)
+
+	// Publish the candidate: every language in the scan had its edge set
+	// re-extracted this attempt, so all of them are dirty. The publication
+	// is one transaction — before it, the published graph is untouched.
+	if err := i.db.Publish(ctx, cand.plan(DetectedLanguages(files))); err != nil {
+		return fmt.Errorf("failed to publish graph: %w", err)
+	}
 
 	// Preserve one diagnostic per language for the build boundary, then the
 	// phase failures, then any server that had to be killed.
@@ -330,7 +337,10 @@ func (i *Indexer) shouldSkipFile(file FileInfo) (bool, error) {
 }
 
 // indexFile indexes a single file and returns number of symbols stored
-func (i *Indexer) indexFile(ctx context.Context, client *lsp.Client, file FileInfo) (int, error) {
+func (i *Indexer) indexFile(ctx context.Context, store graphStore, client *lsp.Client, file FileInfo) (int, error) {
+	// A provider attempt starts fresh for this file.
+	store.BeginFile(file.Path)
+
 	// Convert path to URI
 	fileURI := lsp.PathToURI(file.Path)
 
@@ -357,13 +367,13 @@ func (i *Indexer) indexFile(ctx context.Context, client *lsp.Client, file FileIn
 	lines := lsp.NewSourceLines()
 	lines.Set(file.Path, contentStr)
 	doc := &lspDocument{file: file, enc: client.PositionEncoding(), lines: lines, ids: idAllocator{}}
-	if err := i.storeSymbols(doc, symbols, nil); err != nil {
+	if err := i.storeSymbols(store, doc, symbols, nil); err != nil {
 		return 0, err
 	}
 	count := doc.count
 
 	// Update file metadata
-	if err := i.db.UpdateFileMeta(file.Path, time.Now(), file.Language); err != nil {
+	if err := store.UpdateFileMeta(file.Path, time.Now(), file.Language); err != nil {
 		return 0, err
 	}
 
@@ -380,7 +390,7 @@ type lspDocument struct {
 }
 
 // storeSymbols recursively stores symbols in the database
-func (i *Indexer) storeSymbols(doc *lspDocument, symbols []lsp.DocumentSymbol, owners []string) error {
+func (i *Indexer) storeSymbols(store graphStore, doc *lspDocument, symbols []lsp.DocumentSymbol, owners []string) error {
 	file := doc.file
 	for _, sym := range symbols {
 		key := symbolKey{Language: file.Language, RelPath: file.RelPath, Owners: owners, Name: sym.Name}
@@ -411,7 +421,7 @@ func (i *Indexer) storeSymbols(doc *lspDocument, symbols []lsp.DocumentSymbol, o
 			CreatedAt:     time.Now(),
 		}
 
-		if err := i.db.InsertSymbol(dbSym); err != nil {
+		if err := store.InsertSymbol(dbSym); err != nil {
 			return err
 		}
 		doc.count++
@@ -419,7 +429,7 @@ func (i *Indexer) storeSymbols(doc *lspDocument, symbols []lsp.DocumentSymbol, o
 		// Recursively process children
 		if len(sym.Children) > 0 {
 			childOwners := append(append([]string(nil), key.Owners...), key.Name)
-			if err := i.storeSymbols(doc, sym.Children, childOwners); err != nil {
+			if err := i.storeSymbols(store, doc, sym.Children, childOwners); err != nil {
 				return err
 			}
 		}

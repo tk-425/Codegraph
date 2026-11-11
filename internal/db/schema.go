@@ -84,6 +84,15 @@ CREATE INDEX IF NOT EXISTS idx_calls_callee ON calls(callee_id);
 CREATE INDEX IF NOT EXISTS idx_type_hierarchy_child ON type_hierarchy(child_id);
 CREATE INDEX IF NOT EXISTS idx_type_hierarchy_parent ON type_hierarchy(parent_id);
 `
+
+	// RepairCallsUniqueness backfills the call-site uniqueness that the
+	// calls table's UNIQUE constraint only gives databases created after
+	// it was added: duplicates collapse to their first row, then the index
+	// enforces the constraint from then on. Idempotent on every run.
+	RepairCallsUniqueness = `
+DELETE FROM calls WHERE id NOT IN (SELECT MIN(id) FROM calls GROUP BY caller_id, callee_id, file, line, column);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_calls_site ON calls(caller_id, callee_id, file, line, column);
+`
 )
 
 // graphTables are the tables a format reset drops, children first.
@@ -98,5 +107,6 @@ func AllSchemaStatements() []string {
 		CreateUnresolvedTable,
 		CreateFileMetaTable,
 		CreateIndexes,
+		RepairCallsUniqueness,
 	}
 }

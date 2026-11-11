@@ -49,8 +49,8 @@ type resolution struct {
 // then the language family. The first tier with candidates decides: one is
 // resolved, several are ambiguous. It never takes the first of several and
 // never crosses language families.
-func resolveTarget(database *db.Manager, name string, kinds map[string]bool, at evidence) (resolution, error) {
-	found, err := database.GetSymbolByName(name, languageFamily(at.language))
+func resolveTarget(store graphStore, name string, kinds map[string]bool, at evidence) (resolution, error) {
+	found, err := store.GetSymbolByName(name, languageFamily(at.language))
 	if err != nil {
 		return resolution{}, err
 	}

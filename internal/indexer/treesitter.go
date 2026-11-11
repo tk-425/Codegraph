@@ -13,20 +13,24 @@ import (
 
 // TreeSitterIndexer provides fallback symbol extraction using tree-sitter
 type TreeSitterIndexer struct {
-	db       *db.Manager
+	store    graphStore
 	rootPath string
 }
 
 // NewTreeSitterIndexer creates a new tree-sitter based indexer
-func NewTreeSitterIndexer(dbManager *db.Manager, rootPath string) *TreeSitterIndexer {
+func NewTreeSitterIndexer(store graphStore, rootPath string) *TreeSitterIndexer {
 	return &TreeSitterIndexer{
-		db:       dbManager,
+		store:    store,
 		rootPath: rootPath,
 	}
 }
 
 // IndexFile extracts symbols from a file using tree-sitter
 func (t *TreeSitterIndexer) IndexFile(ctx context.Context, file FileInfo) (int, error) {
+	// A provider attempt starts fresh for this file, so a fallback replaces
+	// what a failed attempt left instead of appending to it.
+	t.store.BeginFile(file.Path)
+
 	// Get the appropriate language
 	lang := grammar(file.Language)
 	if lang == nil {
@@ -54,13 +58,13 @@ func (t *TreeSitterIndexer) IndexFile(ctx context.Context, file FileInfo) (int, 
 
 	// Store symbols in database
 	for _, sym := range symbols {
-		if err := t.db.InsertSymbol(sym); err != nil {
+		if err := t.store.InsertSymbol(sym); err != nil {
 			return 0, err
 		}
 	}
 
 	// Update file metadata
-	if err := t.db.UpdateFileMeta(file.Path, time.Now(), file.Language); err != nil {
+	if err := t.store.UpdateFileMeta(file.Path, time.Now(), file.Language); err != nil {
 		return 0, err
 	}
 
