@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/tk-425/Codegraph/internal/config"
 	"github.com/tk-425/Codegraph/internal/db"
+	"github.com/tk-425/Codegraph/internal/search"
 )
 
 // openStep is one step of the open sequence, in the order openSequence runs
@@ -133,10 +134,11 @@ type Envelope struct {
 
 // OutputMetadata is additive; result counts and existing fields keep their meaning.
 type OutputMetadata struct {
-	Snapshot  *db.Snapshot      `json:"snapshot"`
-	Attempt   *db.BuildAttempt  `json:"attempt,omitempty"`
-	Live      []db.PhaseOutcome `json:"live,omitempty"`
-	Freshness string            `json:"freshness"`
+	Snapshot  *db.Snapshot         `json:"snapshot"`
+	Attempt   *db.BuildAttempt     `json:"attempt,omitempty"`
+	Live      []db.PhaseOutcome    `json:"live,omitempty"`
+	Freshness string               `json:"freshness"`
+	Search    *search.SearchReport `json:"search,omitempty"`
 }
 
 // queryMetadata reads from the same pinned view as the query's graph rows.

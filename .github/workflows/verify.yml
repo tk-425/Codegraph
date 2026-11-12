@@ -65,6 +65,9 @@ jobs:
             internal/cli/callers.go internal/cli/callees.go internal/cli/health_test.go \
             cmd/codegraph/quality_test.go cmd/codegraph/compatibility_test.go \
             internal/db/compatibility_test.go internal/indexer/refresh_test.go \
+            internal/db/search_test.go internal/search/db_test.go \
+            internal/search/ripgrep.go internal/search/ripgrep_test.go \
+            cmd/codegraph/semantics_test.go \
             | awk '!/^testdata\/characterization\/(calls\/lines|positions\/nonbmp)\.go$/')"
           if [ -n "$unformatted" ]; then
             printf '%s\n' "$unformatted"

@@ -27,7 +27,7 @@ func (d *DatabaseTier) Search(ctx context.Context, opts SearchOptions) ([]Search
 	var err error
 
 	if opts.ExactMatch {
-		symbols, err = d.db.GetSymbolByName(opts.Query, opts.Languages)
+		symbols, err = d.db.SearchSymbolsExact(opts.Query, opts.Kind, opts.Languages)
 	} else {
 		symbols, err = d.db.SearchSymbols(opts.Query, opts.Kind, opts.Languages)
 	}
