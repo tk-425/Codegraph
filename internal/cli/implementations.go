@@ -1,26 +1,29 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/tk-425/Codegraph/internal/config"
+	"github.com/tk-425/Codegraph/internal/db"
 	"github.com/tk-425/Codegraph/internal/lsp"
 )
 
 var implementationsLangFlag string
 
 var implementationsCmd = &cobra.Command{
-	Use:   "implementations <interface>",
-	Short: "Find implementations of an interface",
-	Long: `Find all types that implement the specified interface.
+	Use: "implementations <interface>", Short: "Find implementations of an interface",
+	Long: `Find types that implement or extend the specified interface.
+Stored results describe the published snapshot; live LSP fallback is labelled separately.
 
 Examples:
   codegraph implementations Reader
   codegraph implementations Service --lang=go`,
-	Args: cobra.ExactArgs(1),
-	RunE: runImplementations,
+	Args: cobra.ExactArgs(1), RunE: runImplementations,
 }
 
 func init() {
@@ -30,225 +33,143 @@ func init() {
 }
 
 type implementationRecord struct {
-	Name string `json:"name"`
-	Kind string `json:"kind"`
-	File string `json:"file"`
-	Line int    `json:"line"`
+	Name     string   `json:"name"`
+	Kind     string   `json:"kind"`
+	File     string   `json:"file"`
+	Line     int      `json:"line"`
+	ID       string   `json:"id,omitempty"`
+	Source   string   `json:"source"`
+	Origin   string   `json:"origin"`
+	Evidence []string `json:"evidence"`
 }
 
 func runImplementations(cmd *cobra.Command, args []string) error {
-	interfaceName := args[0]
-	if jsonOutputFlag {
-		cmd.SilenceUsage = true
-		cmd.SilenceErrors = true
-		return runImplementationsJSON(cmd, interfaceName)
-	}
-
-	cwd, cfg, dbManager, _, err := openProject()
-	if err != nil {
+	name := args[0]
+	emitErr := func(code string, err error, metadata *OutputMetadata) error {
+		if jsonOutputFlag {
+			if writeErr := EmitJSON(cmd.OutOrStdout(), "implementations", &name, []implementationRecord{}, []EnvelopeError{{Code: failureCode(code, err), Message: err.Error()}}, metadata); writeErr != nil {
+				return writeErr
+			}
+		}
 		return err
 	}
-	defer dbManager.Close()
-
-	// Parse languages filter; it applies to both tiers
+	cwd, cfg, manager, code, err := openProject(commandContext(cmd))
+	if err != nil {
+		return emitErr(code, err, nil)
+	}
+	defer manager.Close()
+	metadata, err := queryMetadata(manager)
+	if err != nil {
+		return emitErr("implementations_lookup_failed", err, nil)
+	}
 	var languages []string
 	if implementationsLangFlag != "" {
 		languages = strings.Split(implementationsLangFlag, ",")
 	}
-
-	// First, try to find implementations in the database (from type_hierarchy table)
-	dbImplementations, err := dbManager.GetImplementationsByName(interfaceName, languages)
+	records, live, err := lookupImplementations(commandContext(cmd), cmd, cwd, cfg, manager, name, languages)
+	metadata.Live = live
 	if err != nil {
-		return fmt.Errorf("failed to find implementations: %w", err)
+		return emitErr("implementations_lookup_failed", err, metadata)
 	}
-	if len(dbImplementations) > 0 {
-		fmt.Printf("🔧 Implementations of %s (%s found):\n\n", Symbol(interfaceName), Info(len(dbImplementations)))
-		for _, impl := range dbImplementations {
-			relPath, _ := filepath.Rel(cwd, impl.File)
-			fmt.Printf("  %s [%s]\n", Symbol(impl.Name), Keyword(impl.Kind))
-			fmt.Printf("    %s\n", Path(fmt.Sprintf("%s:%d", relPath, impl.Line)))
-			if line := getSourceLine(impl.File, impl.Line); line != "" {
-				fmt.Printf("    %s\n", Dim(line))
-			}
-			fmt.Println()
-		}
+	if jsonOutputFlag {
+		return EmitJSON(cmd.OutOrStdout(), "implementations", &name, records, nil, metadata)
+	}
+	if err := printQueryMetadata(cmd, manager); err != nil {
+		return err
+	}
+	if len(records) == 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "🔧 No implementations found for: %s (not proof none exist)\n", name)
 		return nil
 	}
-
-	// If no database results, try LSP as fallback
-	// Find interface symbols in database
-	symbols, err := dbManager.GetSymbolByName(interfaceName, languages)
-	if err != nil {
-		return fmt.Errorf("failed to find symbol: %w", err)
+	fmt.Fprintf(cmd.OutOrStdout(), "🔧 Implementations of %s (%d found):\n", name, len(records))
+	for _, record := range records {
+		fmt.Fprintf(cmd.OutOrStdout(), "  %s [%s] %s:%d (%s; %s)\n", record.Name, record.Kind, record.File, record.Line, record.Origin, strings.Join(record.Evidence, ","))
 	}
-
-	if len(symbols) == 0 {
-		fmt.Printf("🔧 No interface named '%s' found in database\n", interfaceName)
-		return nil
-	}
-
-	// Create LSP manager
-	root := lsp.NewRoot(cwd)
-	lines := lsp.NewSourceLines()
-	lspManager := lsp.NewManager(cfg, root.URI())
-	defer shutdownLiveLSP(cmd, lspManager)
-
-	ctx := commandContext(cmd)
-	found := false
-
-	for _, sym := range symbols {
-		// Only process interface-like symbols
-		if sym.Kind != "interface" && sym.Kind != "class" && sym.Kind != "struct" {
-			continue
-		}
-
-		// Get LSP client for this language
-		client, err := lspManager.GetClient(ctx, sym.Language)
-		if err != nil {
-			continue
-		}
-
-		// Get implementations via LSP
-		fileURI := lsp.PathToURI(sym.File)
-		pos := lines.ToLSP(client.PositionEncoding(), sym.File, sym.Line, sym.Column)
-
-		implementations, err := client.Implementation(ctx, fileURI, pos)
-		if err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return ctxErr
-			}
-			warnLiveLSP(cmd, sym.Language, err)
-			continue
-		}
-
-		if len(implementations) > 0 {
-			if !found {
-				fmt.Printf("🔧 Implementations of %s (%s found via LSP):\n\n", Symbol(interfaceName), Info(len(implementations)))
-				found = true
-			}
-
-			for _, impl := range implementations {
-				implPath, perr := root.Path(impl.URI)
-				if perr != nil {
-					implPath = impl.URI
-				}
-
-				relPath, _ := filepath.Rel(cwd, implPath)
-				fmt.Printf("  %s\n", Path(fmt.Sprintf("%s:%d", relPath, impl.Range.Start.Line+1)))
-			}
-		}
-	}
-
-	if !found {
-		fmt.Printf("🔧 No implementations found for: %s\n", Warning(interfaceName))
-	}
-
 	return nil
 }
 
-func runImplementationsJSON(cmd *cobra.Command, interfaceName string) error {
-	out := cmd.OutOrStdout()
-	emitErr := func(code string, err error) error {
-		_ = EmitJSON(out, "implementations", &interfaceName, []implementationRecord{}, []EnvelopeError{{Code: code, Message: err.Error()}})
-		return err
-	}
-
-	cwd, cfg, dbManager, code, err := openProject()
+func lookupImplementations(ctx context.Context, cmd *cobra.Command, cwd string, cfg *config.Config, manager *db.Manager, name string, languages []string) (records []implementationRecord, outcomes []db.PhaseOutcome, resultErr error) {
+	records = []implementationRecord{}
+	outcomes = []db.PhaseOutcome{}
+	stored, err := manager.GetImplementationsByName(name, languages)
 	if err != nil {
-		return emitErr(code, err)
+		return records, outcomes, err
 	}
-	defer dbManager.Close()
-
-	records := make([]implementationRecord, 0)
-
-	var languages []string
-	if implementationsLangFlag != "" {
-		languages = strings.Split(implementationsLangFlag, ",")
-	}
-
-	dbImpls, err := dbManager.GetImplementationsByName(interfaceName, languages)
-	if err != nil {
-		return emitErr("implementations_lookup_failed", fmt.Errorf("failed to find implementations: %w", err))
-	}
-	for _, impl := range dbImpls {
-		relPath, rerr := filepath.Rel(cwd, impl.File)
-		if rerr != nil {
-			relPath = impl.File
+	relative := func(path string) string {
+		rel, err := filepath.Rel(cwd, path)
+		if err != nil {
+			return path
 		}
-		records = append(records, implementationRecord{
-			Name: impl.Name,
-			Kind: impl.Kind,
-			File: relPath,
-			Line: impl.Line,
-		})
+		return rel
 	}
-
+	for _, symbol := range stored {
+		records = append(records, implementationRecord{Name: symbol.Name, Kind: symbol.Kind, File: relative(symbol.File), Line: symbol.Line, ID: symbol.ID, Source: symbol.Source, Origin: "stored", Evidence: evidenceKinds(symbol.RelationshipEvidence)})
+	}
 	if len(records) > 0 {
-		return EmitJSON(out, "implementations", &interfaceName, records, nil)
+		return records, outcomes, nil
 	}
-
-	// LSP fallback
-	symbols, err := dbManager.GetSymbolByName(interfaceName, languages)
+	symbols, err := manager.GetSymbolByName(name, languages)
 	if err != nil {
-		return emitErr("implementations_lookup_failed", fmt.Errorf("failed to find symbol: %w", err))
+		return records, outcomes, err
 	}
-	if len(symbols) == 0 {
-		return EmitJSON(out, "implementations", &interfaceName, records, nil)
-	}
-
 	root := lsp.NewRoot(cwd)
 	lines := lsp.NewSourceLines()
-	lspManager := lsp.NewManager(cfg, root.URI())
-	defer shutdownLiveLSP(cmd, lspManager)
-
-	ctx := commandContext(cmd)
-	for _, sym := range symbols {
-		if sym.Kind != "interface" && sym.Kind != "class" && sym.Kind != "struct" {
+	providers := lsp.NewManager(cfg, root.URI())
+	defer func() {
+		if err := providers.ShutdownAll(); err != nil {
+			warnLiveLSP(cmd, "cleanup", err)
+			outcomes = append(outcomes, db.PhaseOutcome{Phase: "cleanup", Provider: "lsp", Status: "failed", Reason: err.Error()})
+		}
+	}()
+	successes := 0
+	var failures []error
+	for _, symbol := range symbols {
+		if err := ctx.Err(); err != nil {
+			return records, outcomes, err
+		}
+		if symbol.Kind != "interface" && symbol.Kind != "class" && symbol.Kind != "struct" {
 			continue
 		}
-		client, cerr := lspManager.GetClient(ctx, sym.Language)
-		if cerr != nil {
-			continue
+		phase := db.PhaseOutcome{Language: symbol.Language, Phase: "implementations", Provider: "lsp", Status: "complete"}
+		client, err := providers.GetClient(ctx, symbol.Language)
+		var implementations []lsp.Location
+		if err == nil {
+			pos := lines.ToLSP(client.PositionEncoding(), symbol.File, symbol.Line, symbol.Column)
+			implementations, err = client.Implementation(ctx, lsp.PathToURI(symbol.File), pos)
 		}
-		fileURI := lsp.PathToURI(sym.File)
-		pos := lines.ToLSP(client.PositionEncoding(), sym.File, sym.Line, sym.Column)
-		impls, ierr := client.Implementation(ctx, fileURI, pos)
-		if ierr != nil {
+		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
-				return emitErr("cancelled", ctxErr)
+				return records, outcomes, ctxErr
 			}
-			warnLiveLSP(cmd, sym.Language, ierr)
+			phase.Status = "failed"
+			if lsp.IsUnsupported(err) {
+				phase.Status = "unsupported"
+			}
+			phase.Reason = err.Error()
+			phase.FailedRequests = 1
+			outcomes = append(outcomes, phase)
+			failures = append(failures, err)
+			warnLiveLSP(cmd, symbol.Language, err)
 			continue
 		}
-		for _, impl := range impls {
-			implPath, perr := root.Path(impl.URI)
-			if perr != nil {
-				implPath = impl.URI
+		successes++
+		for _, implementation := range implementations {
+			path, pathErr := root.Path(implementation.URI)
+			if pathErr != nil {
+				path = implementation.URI
 			}
-			relPath, rerr := filepath.Rel(cwd, implPath)
-			if rerr != nil {
-				relPath = implPath
-			}
-			records = append(records, implementationRecord{
-				Name: "",
-				Kind: "",
-				File: relPath,
-				Line: impl.Range.Start.Line + 1,
-			})
+			line, _ := lines.FromLSP(client.PositionEncoding(), path, implementation.Range.Start)
+			records = append(records, implementationRecord{File: relative(path), Line: line, Source: "lsp", Origin: "live", Evidence: []string{"lsp-implementation"}})
 		}
+		phase.Records = len(implementations)
+		outcomes = append(outcomes, phase)
 	}
-
-	return EmitJSON(out, "implementations", &interfaceName, records, nil)
+	if successes == 0 && len(failures) > 0 {
+		return records, outcomes, fmt.Errorf("all live implementation providers failed: %w", errors.Join(failures...))
+	}
+	return records, outcomes, nil
 }
 
-// warnLiveLSP reports a failed live lookup on stderr; stdout stays reserved
-// for the command's own output.
 func warnLiveLSP(cmd *cobra.Command, language string, err error) {
 	fmt.Fprintf(cmd.ErrOrStderr(), "warning: live %s implementation lookup failed: %v\n", language, err)
-}
-
-func shutdownLiveLSP(cmd *cobra.Command, manager *lsp.Manager) {
-	if err := manager.ShutdownAll(); err != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "warning: LSP cleanup: %v\n", err)
-	}
 }

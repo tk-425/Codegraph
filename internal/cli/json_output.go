@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,7 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
+	"strings"
 
+	"github.com/spf13/cobra"
 	"github.com/tk-425/Codegraph/internal/config"
 	"github.com/tk-425/Codegraph/internal/db"
 )
@@ -43,7 +47,7 @@ func (f *openFailure) at(step openStep) bool { return f != nil && f.step == step
 // creates, initializes or migrates anything. Queries reach it through
 // openProject; health renders each step itself. A guard added here reaches
 // both. The returned *db.Manager must be Closed by the caller on success.
-func openSequence() (string, *config.Config, *db.Manager, *openFailure) {
+func openSequence(contexts ...context.Context) (string, *config.Config, *db.Manager, *openFailure) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", nil, nil, &openFailure{stepCwd, err}
@@ -68,6 +72,14 @@ func openSequence() (string, *config.Config, *db.Manager, *openFailure) {
 		dbm.Close()
 		return cwd, cfg, nil, &openFailure{stepDatabaseFormat, err}
 	}
+	ctx := context.Background()
+	if len(contexts) > 0 {
+		ctx = contexts[0]
+	}
+	if err := dbm.PinRead(ctx); err != nil {
+		dbm.Close()
+		return cwd, cfg, nil, &openFailure{stepDatabaseOpen, err}
+	}
 	return cwd, cfg, dbm, nil
 }
 
@@ -76,8 +88,8 @@ func openSequence() (string, *config.Config, *db.Manager, *openFailure) {
 // and a graph in another index format returns "index_format_incompatible".
 // On failure the stable error code can go straight into an EnvelopeError.
 // The returned *db.Manager must be Closed by the caller on success.
-func openProject() (string, *config.Config, *db.Manager, string, error) {
-	cwd, cfg, dbm, failure := openSequence()
+func openProject(contexts ...context.Context) (string, *config.Config, *db.Manager, string, error) {
+	cwd, cfg, dbm, failure := openSequence(contexts...)
 	if failure == nil {
 		return cwd, cfg, dbm, "", nil
 	}
@@ -111,11 +123,64 @@ func JSONOutputEnabled() bool { return jsonOutputFlag }
 // Every key is always present. Query is null for commands that take no
 // query argument. Count always equals the length of Results.
 type Envelope struct {
-	Command string          `json:"command"`
-	Query   *string         `json:"query"`
-	Count   int             `json:"count"`
-	Results any             `json:"results"`
-	Errors  []EnvelopeError `json:"errors"`
+	Command  string          `json:"command"`
+	Query    *string         `json:"query"`
+	Count    int             `json:"count"`
+	Results  any             `json:"results"`
+	Errors   []EnvelopeError `json:"errors"`
+	Metadata *OutputMetadata `json:"metadata,omitempty"`
+}
+
+// OutputMetadata is additive; result counts and existing fields keep their meaning.
+type OutputMetadata struct {
+	Snapshot  *db.Snapshot      `json:"snapshot"`
+	Attempt   *db.BuildAttempt  `json:"attempt,omitempty"`
+	Live      []db.PhaseOutcome `json:"live,omitempty"`
+	Freshness string            `json:"freshness"`
+}
+
+// queryMetadata reads from the same pinned view as the query's graph rows.
+func queryMetadata(manager *db.Manager) (*OutputMetadata, error) {
+	snapshot, err := manager.Snapshot()
+	if err != nil {
+		return nil, err
+	}
+	attempt, err := manager.LatestAttempt()
+	if err != nil {
+		return nil, err
+	}
+	return &OutputMetadata{Snapshot: snapshot, Attempt: attempt, Freshness: "unchecked"}, nil
+}
+
+func printQueryMetadata(cmd *cobra.Command, manager *db.Manager) error {
+	metadata, err := queryMetadata(manager)
+	if err != nil {
+		return err
+	}
+	if metadata.Snapshot == nil {
+		fmt.Fprintln(cmd.ErrOrStderr(), "Snapshot unavailable; quality unknown; freshness unchecked")
+	} else {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Snapshot %s: %s (freshness unchecked; results may be incomplete)\n", metadata.Snapshot.ID, metadata.Snapshot.Quality)
+	}
+	return nil
+}
+
+func evidenceKinds(evidence string) []string {
+	seen := map[string]bool{}
+	for _, kind := range strings.Split(evidence, ",") {
+		if kind != "" {
+			seen[kind] = true
+		}
+	}
+	if len(seen) == 0 {
+		return []string{"unknown"}
+	}
+	kinds := make([]string, 0, len(seen))
+	for kind := range seen {
+		kinds = append(kinds, kind)
+	}
+	sort.Strings(kinds)
+	return kinds
 }
 
 // EnvelopeError is one entry in the envelope's errors array.
@@ -128,7 +193,7 @@ type EnvelopeError struct {
 // the length of results via reflection when results is a slice or array;
 // a nil results value becomes an empty JSON array with count 0. A nil errs
 // slice becomes an empty JSON array.
-func EmitJSON(w io.Writer, command string, query *string, results any, errs []EnvelopeError) error {
+func EmitJSON(w io.Writer, command string, query *string, results any, errs []EnvelopeError, metadata ...*OutputMetadata) error {
 	count := 0
 	if results != nil {
 		rv := reflect.ValueOf(results)
@@ -149,6 +214,9 @@ func EmitJSON(w io.Writer, command string, query *string, results any, errs []En
 		Count:   count,
 		Results: results,
 		Errors:  errs,
+	}
+	if len(metadata) > 0 {
+		env.Metadata = metadata[0]
 	}
 	return json.NewEncoder(w).Encode(env)
 }

@@ -39,6 +39,7 @@ func (d *DatabaseTier) Search(ctx context.Context, opts SearchOptions) ([]Search
 	results := make([]SearchResult, 0, len(symbols))
 	for _, sym := range symbols {
 		results = append(results, SearchResult{
+			ID:        sym.ID,
 			Name:      sym.Name,
 			Kind:      sym.Kind,
 			File:      sym.File,
@@ -46,7 +47,7 @@ func (d *DatabaseTier) Search(ctx context.Context, opts SearchOptions) ([]Search
 			Column:    sym.Column,
 			Signature: sym.Signature,
 			Language:  sym.Language,
-			Source:    "db",
+			Source:    sym.Source,
 			Score:     1.0,
 		})
 	}

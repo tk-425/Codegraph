@@ -67,7 +67,7 @@ func (h *HierarchyIndexer) IndexHierarchyLSP(ctx context.Context, language strin
 		if !openedFiles[fileURI] {
 			content, err := os.ReadFile(sym.File)
 			if err != nil {
-				continue
+				return count, err
 			}
 			if err := client.DidOpenTextDocument(fileURI, language, string(content)); err != nil {
 				h.failures.add(client, err)
@@ -190,11 +190,12 @@ func (p *hierarchyPass) parent(child db.Symbol, item lsp.TypeHierarchyItem) (boo
 		})
 	}
 	err := p.store.InsertTypeHierarchy(&db.TypeHierarchy{
+		Evidence:     "lsp-type-hierarchy",
 		ChildID:      child.ID,
 		ParentID:     parent.ID,
 		Relationship: relationship,
 	})
-	return err == nil, nil
+	return err == nil, err
 }
 
 // IndexHierarchyTreeSitter extracts type hierarchy using tree-sitter parsing
@@ -251,9 +252,9 @@ func (h *HierarchyIndexer) IndexHierarchyTreeSitter(ctx context.Context, file Fi
 			continue
 		}
 		rel.ChildID, rel.ParentID = child.symbol.ID, parent.symbol.ID
-
+		rel.Evidence = "tree-sitter-hierarchy"
 		if err := h.store.InsertTypeHierarchy(rel); err != nil {
-			continue
+			return count, err
 		}
 		count++
 	}

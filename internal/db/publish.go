@@ -37,6 +37,13 @@ type RefreshPlan struct {
 	// transaction, so a failed publication leaves the legacy snapshot
 	// intact (R05, T23). Only an explicitly requested rebuild sets it.
 	ResetFormat bool
+	Attempt     *BuildAttempt
+	Phases      []PhaseOutcome
+	// ExpectedRevision rejects a candidate whose starting graph changed during
+	// extraction, including changes by an older writer with no valid snapshot.
+	ExpectedRevision *int64
+	// PublishedSnapshot is assigned only after a successful commit.
+	PublishedSnapshot *Snapshot
 }
 
 // Publish applies plan in a single transaction on the manager's write
@@ -69,6 +76,23 @@ func (m *Manager) Publish(ctx context.Context, plan *RefreshPlan) error {
 		if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", FormatVersion)); err != nil {
 			return fmt.Errorf("failed to stamp format version: %w", err)
 		}
+	}
+
+	if plan.ExpectedRevision != nil {
+		var revision int64
+		if err := tx.QueryRowContext(ctx, `SELECT revision FROM quality_state WHERE singleton = 1`).Scan(&revision); err != nil {
+			return err
+		}
+		if revision != *plan.ExpectedRevision {
+			return fmt.Errorf("published index changed during extraction; retry build")
+		}
+	}
+
+	// Capture quality before write triggers invalidate it. The previous summary
+	// is reusable only if no older writer has changed its graph since publication.
+	previous, err := readSnapshot(tx.QueryRowContext(ctx, selectValidSnapshot))
+	if err != nil {
+		return fmt.Errorf("failed to read publication quality: %w", err)
 	}
 
 	// Edge sets are deleted through their endpoints, so this must run
@@ -119,18 +143,13 @@ func (m *Manager) Publish(ctx context.Context, plan *RefreshPlan) error {
 		}
 	}
 	for _, c := range plan.Calls {
-		if _, err := tx.ExecContext(ctx, `
-			INSERT OR IGNORE INTO calls (caller_id, callee_id, file, line, column)
-			VALUES (?, ?, ?, ?, ?)`,
-			c.CallerID, c.CalleeID, c.File, c.Line, c.Column); err != nil {
+		if _, err := tx.ExecContext(ctx, insertCallSQL,
+			c.CallerID, c.CalleeID, c.File, c.Line, c.Column, knownEvidence(c.Evidence)); err != nil {
 			return fmt.Errorf("failed to publish call %s -> %s: %w", c.CallerID, c.CalleeID, err)
 		}
 	}
 	for _, th := range plan.TypeHierarchy {
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO type_hierarchy (child_id, parent_id, relationship)
-			VALUES (?, ?, ?)`,
-			th.ChildID, th.ParentID, th.Relationship); err != nil {
+		if err := insertHierarchy(ctx, tx.ExecContext, th); err != nil {
 			return fmt.Errorf("failed to publish type relationship %s -> %s: %w", th.ChildID, th.ParentID, err)
 		}
 	}
@@ -160,8 +179,16 @@ func (m *Manager) Publish(ctx context.Context, plan *RefreshPlan) error {
 		}
 	}
 
+	snapshot, completed, err := publishQuality(ctx, tx, plan, previous)
+	if err != nil {
+		return fmt.Errorf("failed to publish quality: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit publication: %w", err)
+	}
+	plan.PublishedSnapshot = snapshot
+	if completed != nil {
+		*plan.Attempt = *completed
 	}
 	return nil
 }

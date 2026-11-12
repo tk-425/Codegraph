@@ -26,6 +26,8 @@ type Indexer struct {
 	rootPath    string
 	rootURI     string
 	diagnostics []lsp.LSPDiagnostic
+	attempt     *db.BuildAttempt
+	snapshot    *db.Snapshot
 	// phaseDiagnostics holds request failures attributed to a phase during
 	// the current IndexProject call.
 	phaseDiagnostics []lsp.LSPDiagnostic
@@ -35,13 +37,15 @@ type Indexer struct {
 // requestFailures counts the failed LSP requests of one phase and language.
 // Unsupported-method replies are not failures and are not counted.
 type requestFailures struct {
-	executable string
-	count      int
-	first      error
+	executable  string
+	count       int
+	first       error
+	unsupported int
 }
 
 func (f *requestFailures) add(client *lsp.Client, err error) {
 	if lsp.IsUnsupported(err) {
+		f.unsupported++
 		return
 	}
 	if f.count == 0 {
@@ -116,7 +120,21 @@ func (i *Indexer) SetProgressWriter(w io.Writer) { i.progress = w }
 // builds an in-memory candidate; the published graph changes only when
 // the final RefreshPlan publishes atomically (R05), so a failed or
 // cancelled attempt leaves the previous snapshot intact.
-func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool) error {
+func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool) (resultErr error) {
+	i.attempt = db.NewBuildAttempt()
+	i.snapshot = nil
+	i.diagnostics = nil
+	defer func() {
+		// Setup/cancellation before durable attempt registration still gets an
+		// accurate invocation-local report at the output boundary.
+		if resultErr != nil && i.attempt.Outcome == "running" {
+			now := time.Now().UTC()
+			i.attempt.FinishedAt, i.attempt.Outcome, i.attempt.Error = &now, "failed", resultErr.Error()
+			if errors.Is(resultErr, context.Canceled) || errors.Is(resultErr, context.DeadlineExceeded) {
+				i.attempt.Outcome = "cancelled"
+			}
+		}
+	}()
 	i.phaseDiagnostics = nil
 	if err := ctx.Err(); err != nil {
 		return err
@@ -137,6 +155,67 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 			resetFormat = true
 		}
 	}
+
+	groups := GroupByLanguage(files)
+	var expectedRevision *int64
+	if !resetFormat {
+		revision, err := i.db.PublicationRevision()
+		if err != nil {
+			return err
+		}
+		expectedRevision = &revision
+		i.snapshot, err = i.db.Snapshot()
+		if err != nil {
+			return err
+		}
+		if err := i.db.RecordAttempt(ctx, i.attempt); err != nil {
+			return err
+		}
+	}
+	closed := false
+	finishProviders := func() {
+		if closed {
+			return
+		}
+		closed = true
+		i.attempt.Phases = db.SummarizePhases(i.attempt.Phases)
+		i.diagnostics = append(i.lsp.Diagnostics(), i.phaseDiagnostics...)
+		for language := range groups {
+			executable := i.lsp.Executable(language)
+			if err := i.lsp.ShutdownLanguage(language); err != nil {
+				i.diagnostics = append(i.diagnostics, lsp.LSPDiagnostic{Language: language, Executable: executable, Category: lsp.CleanupFailed, Severity: lsp.SeverityWarning, Reason: err.Error()})
+			}
+		}
+		for _, diagnostic := range i.Diagnostics() {
+			i.attempt.Diagnostics = append(i.attempt.Diagnostics, db.AttemptDiagnostic{Language: diagnostic.Language, Category: string(diagnostic.Category), Severity: string(diagnostic.Severity), Reason: diagnostic.Reason})
+		}
+	}
+	defer func() {
+		finishProviders()
+		if resultErr != nil {
+			now := time.Now().UTC()
+			i.attempt.FinishedAt, i.attempt.Outcome, i.attempt.Error = &now, "failed", resultErr.Error()
+			if errors.Is(resultErr, context.Canceled) || errors.Is(resultErr, context.DeadlineExceeded) {
+				i.attempt.Outcome = "cancelled"
+			}
+			// A cancelled command context cannot finalize its durable attempt.
+			// Use an independent bounded write; never mutate an incompatible graph.
+			if !resetFormat {
+				// Another writer may have invalidated the starting publication while
+				// this attempt ran. Do not emit that stale summary on failure.
+				snapshot, snapshotErr := i.db.Snapshot()
+				i.snapshot = snapshot
+				if snapshotErr != nil {
+					resultErr = errors.Join(resultErr, fmt.Errorf("read current publication quality: %w", snapshotErr))
+				}
+				finalCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if err := i.db.RecordAttempt(finalCtx, i.attempt); err != nil {
+					resultErr = errors.Join(resultErr, fmt.Errorf("record failed attempt: %w", err))
+				}
+			}
+		}
+	}()
 
 	// The published manifest decides what the refresh removes: files the
 	// scan no longer returns (deleted, renamed, moved, newly ignored),
@@ -168,8 +247,6 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 	}
 	sort.Strings(removed)
 
-	// Group files by language
-	groups := GroupByLanguage(files)
 	// changedPaths are the files this attempt re-extracts; their old and
 	// new languages end up dirty.
 	changedPaths := map[string]bool{}
@@ -191,7 +268,10 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 
 		// Get LSP client for this language. Startup failures are recorded by
 		// the manager; indexing continues with fallback.
-		client, _ := i.lsp.GetClient(ctx, language)
+		client, startupErr := i.lsp.GetClient(ctx, language)
+		if startupErr != nil {
+			i.attempt.Phases = append(i.attempt.Phases, db.PhaseOutcome{Language: language, Phase: "symbols", Provider: "lsp", Status: "failed", Reason: startupErr.Error()})
+		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -201,7 +281,10 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 		// server and live capabilities (R02).
 		digest := providerDigest(language, i.lsp, client)
 		digests[language] = digest
-		providerInvalidated := storedDigests[language] != digest
+		// Missing/invalidated quality cannot be backfilled with invented historical
+		// provenance. An ordinary build re-extracts to establish it, without a
+		// format reset or requiring --force from an upgrading user.
+		providerInvalidated := storedDigests[language] != digest || i.snapshot == nil
 		digestChanged[language] = providerInvalidated
 		provider := "tree-sitter"
 		if client != nil {
@@ -236,7 +319,9 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 			// is retried boundedly and never published as fresh (T05).
 			var symbols int
 			var source string
+			var lspSucceeded bool
 			stableErr := withStableSource(file.Path, stableSourceAttempts, func(content []byte, hash string, mtime time.Time) (bool, error) {
+				lspSucceeded = false
 				if client != nil {
 					// Settle only once a live server has files to index.
 					if !settled {
@@ -252,28 +337,32 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 						}
 						symbolFailures.add(client, err)
 					} else if count > 0 {
-						symbols, source = count, "lsp"
+						symbols, source, lspSucceeded = count, "lsp", true
 						return true, nil
+					} else {
+						i.attempt.Phases = append(i.attempt.Phases, db.PhaseOutcome{Language: language, Phase: "symbols", Provider: "lsp", Status: "complete", Files: 1, Reason: "successful empty response; syntax supplementation attempted"})
 					}
 				}
 				tsSymbols, tsErr := NewTreeSitterIndexer(store, i.rootPath).IndexFileContent(ctx, file, content, hash, mtime)
 				if tsErr != nil {
-					if err != nil {
-						fmt.Fprintf(i.progress, "\n   ⚠️  Error indexing %s: %v (tree-sitter: %v)\n", file.RelPath, err, tsErr)
-					}
-					return false, nil
+					i.attempt.Phases = append(i.attempt.Phases, db.PhaseOutcome{Language: language, Phase: "symbols", Provider: "tree-sitter", Status: "failed", Files: 1, Reason: tsErr.Error()})
+					return false, fmt.Errorf("no usable symbol provider for %s: %w", file.RelPath, tsErr)
 				}
 				symbols, source = tsSymbols, "tree-sitter"
 				return true, nil
 			})
 			if stableErr != nil {
+				i.recordRequestFailures("symbols", language, symbolFailures)
+				if symbolFailures.count > 0 || symbolFailures.unsupported > 0 {
+					i.attempt.Phases = append(i.attempt.Phases, requestOutcome(language, "symbols", 0, symbolFailures, nil))
+				}
 				return stableErr
 			}
-			if symbols == 0 {
-				// Neither provider produced anything; the file stays
-				// changed for the next refresh.
-				continue
+			status := "fallback"
+			if lspSucceeded {
+				status = "complete"
 			}
+			i.attempt.Phases = append(i.attempt.Phases, db.PhaseOutcome{Language: language, Phase: "symbols", Provider: source, Status: status, Files: 1, Records: symbols})
 			changedPaths[file.Path] = true
 			langIndexed++
 			indexedFiles++
@@ -291,7 +380,13 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 		} else if langSkipped > 0 {
 			fmt.Fprintf(i.progress, "\r   [%s] 0 indexed, %d skipped (unchanged)         \n", language, langSkipped)
 		}
+		if langSkipped > 0 {
+			i.attempt.Phases = append(i.attempt.Phases, db.PhaseOutcome{Language: language, Phase: "symbols", Provider: provider, Status: "reused", Files: langSkipped})
+		}
 		i.recordRequestFailures("symbols", language, symbolFailures)
+		if symbolFailures.count > 0 || symbolFailures.unsupported > 0 {
+			i.attempt.Phases = append(i.attempt.Phases, requestOutcome(language, "symbols", 0, symbolFailures, nil))
+		}
 	}
 
 	// A language is dirty when any of its files was added, changed or
@@ -336,14 +431,27 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 			return ctxErr
 		}
 		i.recordRequestFailures("calls", language, callGraphIndexer.failures)
-		if err != nil || calls == 0 {
+		i.attempt.Phases = append(i.attempt.Phases, requestOutcome(language, "calls", calls, callGraphIndexer.failures, err))
+		if err != nil || calls == 0 || callGraphIndexer.failures.count > 0 || callGraphIndexer.failures.unsupported > 0 {
+			totalCalls += calls
+			fallback := db.PhaseOutcome{Language: language, Phase: "calls", Provider: "tree-sitter", Status: "fallback"}
 			// LSP failed or returned nothing, try tree-sitter
 			for _, file := range groups[language] {
-				tsCount, tsErr := callExtractor.ExtractCalls(ctx, file)
-				if tsErr == nil {
-					totalCalls += tsCount
+				if _, ok := callSyntaxes[file.Language]; !ok || grammar(file.Language) == nil {
+					fallback.Status = "unsupported"
+					continue
 				}
+				tsCount, tsErr := callExtractor.ExtractCalls(ctx, file)
+				if tsErr != nil {
+					fallback.Status, fallback.Reason = "failed", tsErr.Error()
+					i.attempt.Phases = append(i.attempt.Phases, fallback)
+					return tsErr
+				}
+				totalCalls += tsCount
+				fallback.Records += tsCount
+				fallback.Files++
 			}
+			i.attempt.Phases = append(i.attempt.Phases, fallback)
 			if err != nil {
 				// Only show warning if there was an actual error (not just 0 results)
 				fmt.Fprintf(i.progress, "   ⚠️  Call graph LSP error for %s (using tree-sitter): %v\n", language, err)
@@ -369,14 +477,27 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 			return ctxErr
 		}
 		i.recordRequestFailures("hierarchy", language, hierarchyIndexer.failures)
-		if err != nil || count == 0 {
-			// LSP hierarchy failed or returned nothing, try tree-sitter
+		i.attempt.Phases = append(i.attempt.Phases, requestOutcome(language, "hierarchy", count, hierarchyIndexer.failures, err))
+		if err != nil || count == 0 || hierarchyIndexer.failures.count > 0 || hierarchyIndexer.failures.unsupported > 0 {
+			totalHierarchy += count
+			fallback := db.PhaseOutcome{Language: language, Phase: "hierarchy", Provider: "tree-sitter", Status: "fallback"}
+			// Failed/unsupported semantic extraction may use syntax fallback.
 			for _, file := range groups[language] {
-				tsCount, tsErr := hierarchyIndexer.IndexHierarchyTreeSitter(ctx, file)
-				if tsErr == nil {
-					totalHierarchy += tsCount
+				if !supportsSyntaxHierarchy(file.Language) {
+					fallback.Status = "unsupported"
+					continue
 				}
+				tsCount, tsErr := hierarchyIndexer.IndexHierarchyTreeSitter(ctx, file)
+				if tsErr != nil {
+					fallback.Status, fallback.Reason = "failed", tsErr.Error()
+					i.attempt.Phases = append(i.attempt.Phases, fallback)
+					return tsErr
+				}
+				totalHierarchy += tsCount
+				fallback.Records += tsCount
+				fallback.Files++
 			}
+			i.attempt.Phases = append(i.attempt.Phases, fallback)
 			continue
 		}
 		totalHierarchy += count
@@ -387,41 +508,67 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 	// re-extracted this attempt, and the removed files disappear with it.
 	// The publication is one transaction — before it, the published graph
 	// is untouched.
+	finishProviders()
 	plan := cand.plan(removed, dirtyLanguages)
+	plan.Attempt = i.attempt
+	plan.ExpectedRevision = expectedRevision
+	for _, phase := range i.attempt.Phases {
+		if dirty[phase.Language] {
+			plan.Phases = append(plan.Phases, phase)
+		}
+	}
 	plan.ProviderState = digests
 	plan.ResetFormat = resetFormat
 	if err := i.db.Publish(ctx, plan); err != nil {
 		return fmt.Errorf("failed to publish graph: %w", err)
 	}
 
-	// Preserve one diagnostic per language for the build boundary, then the
-	// phase failures, then any server that had to be killed.
-	i.diagnostics = append(i.lsp.Diagnostics(), i.phaseDiagnostics...)
-	for language := range groups {
-		executable := i.lsp.Executable(language)
-		if err := i.lsp.ShutdownLanguage(language); err != nil {
-			i.diagnostics = append(i.diagnostics, lsp.LSPDiagnostic{
-				Language:   language,
-				Executable: executable,
-				Category:   lsp.CleanupFailed,
-				Severity:   lsp.SeverityWarning,
-				Reason:     err.Error(),
-			})
-		}
-	}
-
-	unresolved, err := i.db.GetUnresolved()
-	if err != nil {
-		return fmt.Errorf("failed to count unresolved relationships: %w", err)
+	i.snapshot = plan.PublishedSnapshot
+	unresolved := 0
+	for _, count := range i.snapshot.Counts.Unresolved {
+		unresolved += count
 	}
 	fmt.Fprintf(i.progress, "✅ Indexed %d files, skipped %d unchanged, %d symbols, %d calls, %d type relations, %d unresolved sites\n",
-		indexedFiles, skippedFiles, totalSymbols, totalCalls, totalHierarchy, len(unresolved))
+		indexedFiles, skippedFiles, totalSymbols, totalCalls, totalHierarchy, unresolved)
 	return nil
 }
 
 // Diagnostics returns the non-fatal LSP diagnostics collected during indexing.
 func (i *Indexer) Diagnostics() []lsp.LSPDiagnostic {
 	return append([]lsp.LSPDiagnostic(nil), i.diagnostics...)
+}
+
+// Attempt and Snapshot expose this invocation's report without rereading a
+// possibly newer concurrent publication at the CLI boundary.
+func (i *Indexer) Attempt() *db.BuildAttempt { return i.attempt }
+func (i *Indexer) Snapshot() *db.Snapshot    { return i.snapshot }
+
+func requestOutcome(language, phase string, records int, failures requestFailures, err error) db.PhaseOutcome {
+	outcome := db.PhaseOutcome{Language: language, Phase: phase, Provider: "lsp", Status: "complete", Records: records, FailedRequests: failures.count}
+	if failures.unsupported > 0 {
+		outcome.Status = "unsupported"
+		outcome.Reason = "provider does not support required requests"
+	}
+	if err != nil || failures.count > 0 {
+		outcome.Status = "failed"
+		if err != nil {
+			outcome.Reason = err.Error()
+		} else if failures.first != nil {
+			outcome.Reason = failures.first.Error()
+		}
+	}
+	return outcome
+}
+
+func supportsSyntaxHierarchy(language string) bool {
+	if grammar(language) == nil {
+		return false
+	}
+	switch language {
+	case "csharp", "java", "typescript", "typescriptreact", "javascript", "python", "swift", "rust", "go", "ocaml":
+		return true
+	}
+	return false
 }
 
 // stableSourceAttempts bounds how often a mutating source is retried

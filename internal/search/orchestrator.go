@@ -8,25 +8,26 @@ import (
 
 // SearchResult represents a search match
 type SearchResult struct {
-	Name       string  `json:"name"`
-	Kind       string  `json:"kind"`
-	File       string  `json:"file"`
-	Line       int     `json:"line"`
-	Column     int     `json:"column"`
-	Signature  string  `json:"signature,omitempty"`
-	Language   string  `json:"language"`
-	Source     string  `json:"source"` // "db", "treesitter", "ripgrep"
-	Score      float64 `json:"score"`
-	Context    string  `json:"context,omitempty"` // Line content for ripgrep results
+	ID        string  `json:"id,omitempty"`
+	Name      string  `json:"name"`
+	Kind      string  `json:"kind"`
+	File      string  `json:"file"`
+	Line      int     `json:"line"`
+	Column    int     `json:"column"`
+	Signature string  `json:"signature,omitempty"`
+	Language  string  `json:"language"`
+	Source    string  `json:"source"` // Extraction provider: lsp, tree-sitter or ripgrep
+	Score     float64 `json:"score"`
+	Context   string  `json:"context,omitempty"` // Line content for ripgrep results
 }
 
 // SearchOptions configures search behavior
 type SearchOptions struct {
-	Query     string
-	Kind      string   // Optional: filter by kind (function, class, etc.)
-	Languages []string // Optional: filter by language
-	Limit     int      // Max results (0 = unlimited)
-	ExactMatch bool    // Require exact name match
+	Query      string
+	Kind       string   // Optional: filter by kind (function, class, etc.)
+	Languages  []string // Optional: filter by language
+	Limit      int      // Max results (0 = unlimited)
+	ExactMatch bool     // Require exact name match
 }
 
 // Tier represents a search tier in the fallback chain

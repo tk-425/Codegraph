@@ -145,10 +145,12 @@ func healthStates() []healthState {
 				{Category: "stats", Name: "symbols", OK: true, Detail: "0"},
 				{Category: "stats", Name: "calls", OK: true, Detail: "0"},
 				{Category: "stats", Name: "files", OK: true, Detail: "0"},
+				{Category: "snapshot", Name: "quality", OK: false, Detail: "unavailable; quality unknown; freshness unchecked"},
 			}, lspRecords...),
 			human: append(append(append([]string{}, passed...),
 				"✅ Database: accessible", "", "📊 Statistics:",
 				"   Symbols:   0", "   Calls:     0", "   Files:     0",
+				"❌ Snapshot: unavailable; quality unknown; freshness unchecked",
 				"", "🔧 LSP Servers:"), lspLines...),
 		},
 	}

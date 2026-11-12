@@ -13,8 +13,11 @@ jobs:
     env:
       CGO_ENABLED: "1"
       GOTOOLCHAIN: local
+      CODEGRAPH_REQUIRE_COMPATIBILITY: "1"
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # local v0.9.0 source for upgrade/downgrade process checks
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -25,11 +28,12 @@ jobs:
         run: go test ./...
       - name: Characterization controls and fixed cases
         # F06 (transport) and F08 (JSON boundary) were fixed by S1; F02
-        # (identity), F03 (reference vs call) and F04 (hierarchy) by S2.
-        run: go test -tags characterization -run '^TestCharacterization(Control|F01|F02|F03|F04|F05|F06|F08)' -count=1 -timeout=180s ./...
+        # (identity), F03 (reference vs call) and F04 (hierarchy) by S2;
+        # F01/F05 (safe refresh) by S3 and F07 (provenance) by S4a.
+        run: go test -tags characterization -run '^TestCharacterization' -count=1 -timeout=180s ./...
       - name: Vet
         run: go vet ./...
-      - name: Format S0 and S1 files
+      - name: Format maintained files
         # Existing formatting debt is recorded in the fix-spec, not auto-fixed here.
         # Two fixtures keep a layout gofmt would undo: same-line recursion
         # (T15) and a non-BMP character before a name on one line (T40).
@@ -53,6 +57,14 @@ jobs:
             internal/lsp/manager.go internal/lsp/manager_test.go \
             internal/lsp/diagnostics.go internal/lsp/lifecycle_test.go \
             internal/lsp/main_test.go internal/search/orchestrator_test.go \
+            internal/db/models.go internal/db/schema.go internal/db/publish.go \
+            internal/db/quality.go internal/db/quality_test.go \
+            internal/indexer/candidate.go internal/indexer/callgraph.go \
+            internal/indexer/treesitter.go internal/indexer/treesitter_calls.go \
+            internal/indexer/quality_test.go internal/search/db.go internal/search/orchestrator.go \
+            internal/cli/callers.go internal/cli/callees.go internal/cli/health_test.go \
+            cmd/codegraph/quality_test.go cmd/codegraph/compatibility_test.go \
+            internal/db/compatibility_test.go internal/indexer/refresh_test.go \
             | awk '!/^testdata\/characterization\/(calls\/lines|positions\/nonbmp)\.go$/')"
           if [ -n "$unformatted" ]; then
             printf '%s\n' "$unformatted"
