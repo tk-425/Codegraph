@@ -126,10 +126,11 @@ CodeGraph works best with Language Servers installed for precise call graphs and
 | `init`               | Initialize codegraph in the current directory.                  |
 | `build`              | Update the index (incremental). Use `--force` for full rebuild. |
 | `search <query>`     | Literal symbol-name substring search, with eligible text fallback. |
-| `callers <symbol>`   | Find functions that call the specified symbol.                  |
-| `callees <symbol>`   | Find functions called by the specified symbol.                  |
+| `callers <symbol>`   | Find direct callers (one hop only).                             |
+| `callees <symbol>`   | Find direct callees (one hop only).                             |
 | `signature <symbol>` | Show function signature and documentation.                      |
 | `implementations`    | Find implementations of an interface/class.                     |
+| `types <symbol>`     | Not implemented; exits nonzero in human and JSON modes.         |
 | `projects`           | List all projects tracked in the global registry.               |
 | `prune`              | Remove missing projects from the registry.                      |
 | `health`             | Run diagnostics on the current project.                         |
@@ -167,6 +168,18 @@ Text results remain `kind: match`, `source: ripgrep`, `origin: text` with contex
 they are not symbol definitions and have no fabricated symbol ID. An empty eligible
 file set needs no ripgrep process; eligible-file searches require `rg` on PATH.
 Database reads do not rebuild or modify the index, and freshness remains unchecked.
+
+### Call-query depth and unsupported types
+
+`callers` and `callees` query one hop of the stored call graph. `--depth` defaults
+to 1; explicit `--depth=1` has the same behavior. Other integer values fail with
+`not_implemented` in JSON mode, before opening project state. Malformed depth
+values fail with `invalid_arguments`. Human mode also exits nonzero.
+
+`types` lookups are not implemented: every query exits nonzero, including
+`--supertypes`, `--subtypes` and `--lang` combinations. JSON retains an empty
+`results` array, `count: 0` and a `not_implemented` error. Neither rejection
+initializes, rebuilds or modifies an index.
 
 ### JSON output
 

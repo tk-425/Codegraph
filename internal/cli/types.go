@@ -14,10 +14,11 @@ var (
 
 var typesCmd = &cobra.Command{
 	Use:   "types <symbol>",
-	Short: "Find type hierarchy (superclasses/subclasses)",
-	Long: `Find the type hierarchy for a class or interface.
+	Short: "Type hierarchy (not implemented)",
+	Long: `Type hierarchy queries are not implemented and exit nonzero.
+No type hierarchy is queried. Direction and language flags are reserved.
 
-Examples:
+Examples (report unsupported):
   codegraph types ConfigManager --supertypes
   codegraph types BaseHandler --subtypes
   codegraph types Service --lang=go,java`,
@@ -43,31 +44,13 @@ type typeRecord struct {
 
 func runTypes(cmd *cobra.Command, args []string) error {
 	symbol := args[0]
+	err := withCode("not_implemented", fmt.Errorf("types command not yet implemented"))
 	if jsonOutputFlag {
 		cmd.SilenceUsage = true
 		cmd.SilenceErrors = true
-		err := fmt.Errorf("types command not yet implemented")
 		_ = EmitJSON(cmd.OutOrStdout(), "types", &symbol, []typeRecord{},
 			[]EnvelopeError{{Code: "not_implemented", Message: err.Error()}})
-		return err
 	}
 
-	fmt.Printf("🔗 Finding type hierarchy for: %s\n", symbol)
-
-	if typesSupertypesFlag {
-		fmt.Println("   Direction: supertypes")
-	}
-	if typesSubtypesFlag {
-		fmt.Println("   Direction: subtypes")
-	}
-	if !typesSupertypesFlag && !typesSubtypesFlag {
-		fmt.Println("   Direction: both")
-	}
-	if typesLangFlag != "" {
-		fmt.Printf("   Languages: %s\n", typesLangFlag)
-	}
-
-	// TODO: Implement types logic
-	fmt.Println("\n⚠️  Not yet implemented")
-	return nil
+	return err
 }

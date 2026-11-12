@@ -242,6 +242,145 @@ func TestSearchStoredLimitsAndCaseCompatibility(t *testing.T) {
 	}
 }
 
+// T41: depth 1 remains a one-hop, read-only query, not transitive traversal.
+func TestCallQueriesDepthOnePreservesDirectResults(t *testing.T) {
+	root := newSyntaxProject(t, map[string]string{
+		"source.go": "package fixture\nfunc First() { Middle() }\nfunc Middle() { Last() }\nfunc Last() {}\n",
+	})
+	requireBuild(t, root)
+	dbPath := filepath.Join(root, ".codegraph", "graphs", "codegraph.db")
+	before := fileDigest(t, dbPath)
+	for _, tc := range []struct{ command, symbol string }{
+		{"callers", "Last"},
+		{"callees", "First"},
+	} {
+		t.Run(tc.command, func(t *testing.T) {
+			for _, jsonMode := range []bool{false, true} {
+				args := []string{tc.command, tc.symbol, "--lang=go"}
+				if jsonMode {
+					args = append(args, "--json")
+				}
+				implicit := runCLI(t, root, args...)
+				explicit := runCLI(t, root, append(args, "--depth=1")...)
+				if implicit.exit != 0 || explicit.exit != 0 {
+					t.Fatalf("depth 1 failed: implicit=%+v explicit=%+v", implicit, explicit)
+				}
+				if !bytes.Equal(implicit.stdout, explicit.stdout) || !bytes.Equal(implicit.stderr, explicit.stderr) {
+					t.Fatalf("explicit depth changed output: implicit=%+v explicit=%+v", implicit, explicit)
+				}
+				if jsonMode {
+					env := requireOneEnvelope(t, explicit)
+					if env.Count != 1 || len(env.Errors) != 0 {
+						t.Fatalf("expected one direct result: %s", explicit.stdout)
+					}
+					var record struct{ Name, ID, Source, Origin string }
+					if err := json.Unmarshal(env.Results[0], &record); err != nil {
+						t.Fatal(err)
+					}
+					if record.Name != "Middle" || record.ID == "" || record.Source != "tree-sitter" || record.Origin != "stored" {
+						t.Fatalf("direct result lost identity/provenance: %+v", record)
+					}
+				} else if !strings.Contains(string(explicit.stdout), "Middle") || strings.Count(string(explicit.stdout), "[function]") != 1 {
+					t.Fatalf("missing direct human result: %s", explicit.stdout)
+				}
+			}
+		})
+	}
+	if fileDigest(t, dbPath) != before {
+		t.Fatal("depth 1 queries modified the published database")
+	}
+}
+
+func TestCallQueriesRejectUnsupportedAndMalformedDepth(t *testing.T) {
+	indexed := newSyntaxProject(t, map[string]string{"source.go": "package fixture\nfunc Target() {}\n"})
+	requireBuild(t, indexed)
+	dbPath := filepath.Join(indexed, ".codegraph", "graphs", "codegraph.db")
+	before := fileDigest(t, dbPath)
+	for _, command := range []string{"callers", "callees"} {
+		for _, tc := range []struct{ depth, code string }{
+			{"2", "not_implemented"},
+			{"0", "not_implemented"},
+			{"-1", "not_implemented"},
+			{"2147483647", "not_implemented"},
+			{"bad", "invalid_arguments"},
+			{"1.5", "invalid_arguments"},
+			{"", "invalid_arguments"},
+			{"999999999999999999999999999999", "invalid_arguments"},
+		} {
+			t.Run(command+"/"+tc.depth, func(t *testing.T) {
+				empty := t.TempDir()
+				for _, root := range []string{empty, indexed} {
+					args := []string{command, "Target", "--depth=" + tc.depth}
+					result := runCLI(t, root, append(args, "--json")...)
+					env := requireErrorCode(t, result, tc.code)
+					if env.Command != command || env.Count != 0 || len(result.stderr) != 0 {
+						t.Fatalf("unexpected rejection envelope: stdout=%s stderr=%s", result.stdout, result.stderr)
+					}
+					if tc.code == "not_implemented" && !bytes.Contains(result.stdout, []byte("only --depth=1")) {
+						t.Fatalf("missing supported-depth guidance: %s", result.stdout)
+					}
+					human := runCLI(t, root, args...)
+					if human.exit == 0 || len(human.stdout) != 0 || !bytes.Contains(human.stderr, []byte("depth")) {
+						t.Fatalf("human rejection: exit=%d stdout=%s stderr=%s", human.exit, human.stdout, human.stderr)
+					}
+				}
+				entries, err := os.ReadDir(empty)
+				if err != nil || len(entries) != 0 {
+					t.Fatalf("rejected query created project artifacts: entries=%v err=%v", entries, err)
+				}
+			})
+		}
+	}
+	if fileDigest(t, dbPath) != before {
+		t.Fatal("rejected depths modified the published database")
+	}
+}
+
+func TestTypesAlwaysReportsUnsupported(t *testing.T) {
+	indexed := newSyntaxProject(t, map[string]string{"source.go": "package fixture\ntype Reader struct{}\n"})
+	requireBuild(t, indexed)
+	dbPath := filepath.Join(indexed, ".codegraph", "graphs", "codegraph.db")
+	before := fileDigest(t, dbPath)
+	for _, flags := range [][]string{
+		nil,
+		{"--supertypes"},
+		{"--subtypes"},
+		{"--supertypes", "--subtypes"},
+		{"--lang=go,java"},
+		{"--supertypes", "--subtypes", "--lang=go,java"},
+	} {
+		t.Run(strings.Join(flags, " "), func(t *testing.T) {
+			empty := t.TempDir()
+			for _, root := range []string{empty, indexed} {
+				args := append([]string{"types", "Reader"}, flags...)
+				result := runCLI(t, root, append(args, "--json")...)
+				env := requireErrorCode(t, result, "not_implemented")
+				if env.Command != "types" || env.Count != 0 || len(result.stderr) != 0 {
+					t.Fatalf("unexpected types envelope: stdout=%s stderr=%s", result.stdout, result.stderr)
+				}
+				var query struct{ Query string }
+				if err := json.Unmarshal(result.stdout, &query); err != nil {
+					t.Fatal(err)
+				}
+				if query.Query != "Reader" {
+					t.Fatalf("types lost its query: %s", result.stdout)
+				}
+				human := runCLI(t, root, args...)
+				if human.exit == 0 || len(human.stdout) != 0 || !bytes.Contains(human.stderr, []byte("types command not yet implemented")) {
+					t.Fatalf("human types: exit=%d stdout=%s stderr=%s", human.exit, human.stdout, human.stderr)
+				}
+			}
+			entries, err := os.ReadDir(empty)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("unsupported types created project artifacts: entries=%v err=%v", entries, err)
+			}
+		})
+	}
+	if fileDigest(t, dbPath) != before {
+		t.Fatal("unsupported types modified the published database")
+	}
+}
+
 func fileDigest(t *testing.T, path string) [32]byte {
 	t.Helper()
 	content, err := os.ReadFile(path)

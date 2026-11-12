@@ -16,18 +16,19 @@ var (
 var calleesCmd = &cobra.Command{
 	Use:   "callees <symbol>",
 	Short: "Find all functions called by a given symbol",
-	Long: `Find all functions that the specified symbol calls.
+	Long: `Find direct callees of the specified symbol in the stored call graph.
+Only one hop is supported; --depth must be 1.
 
 Examples:
   codegraph callees main
-  codegraph callees handleRequest --depth=2
+  codegraph callees handleRequest --depth=1
   codegraph callees process --lang=go`,
 	Args: cobra.ExactArgs(1),
 	RunE: runCallees,
 }
 
 func init() {
-	calleesCmd.Flags().IntVar(&calleesDepthFlag, "depth", 1, "Depth of call chain to traverse")
+	calleesCmd.Flags().IntVar(&calleesDepthFlag, "depth", 1, "Call-chain depth (only 1 is supported)")
 	calleesCmd.Flags().StringVar(&calleesLangFlag, "lang", "", "Filter by language(s), comma-separated")
 	supportJSON(calleesCmd)
 	rootCmd.AddCommand(calleesCmd)
@@ -46,6 +47,9 @@ type calleeRecord struct {
 }
 
 func runCallees(cmd *cobra.Command, args []string) error {
+	if calleesDepthFlag != 1 {
+		return withCode("not_implemented", fmt.Errorf("--depth=%d is not supported; only --depth=1 (direct callees) is implemented", calleesDepthFlag))
+	}
 	symbol := args[0]
 	if jsonOutputFlag {
 		cmd.SilenceUsage = true
