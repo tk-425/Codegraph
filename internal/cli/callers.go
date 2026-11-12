@@ -18,18 +18,19 @@ var (
 var callersCmd = &cobra.Command{
 	Use:   "callers <symbol>",
 	Short: "Find all functions that call a given symbol",
-	Long: `Find all functions that call the specified symbol.
+	Long: `Find direct callers of the specified symbol in the stored call graph.
+Only one hop is supported; --depth must be 1.
 
 Examples:
   codegraph callers parseConfig
-  codegraph callers handleRequest --depth=2
+  codegraph callers handleRequest --depth=1
   codegraph callers parse --lang=go,python`,
 	Args: cobra.ExactArgs(1),
 	RunE: runCallers,
 }
 
 func init() {
-	callersCmd.Flags().IntVar(&callersDepthFlag, "depth", 1, "Depth of call chain to traverse")
+	callersCmd.Flags().IntVar(&callersDepthFlag, "depth", 1, "Call-chain depth (only 1 is supported)")
 	callersCmd.Flags().StringVar(&callersLangFlag, "lang", "", "Filter by language(s), comma-separated")
 	supportJSON(callersCmd)
 	rootCmd.AddCommand(callersCmd)
@@ -48,6 +49,9 @@ type callerRecord struct {
 }
 
 func runCallers(cmd *cobra.Command, args []string) error {
+	if callersDepthFlag != 1 {
+		return withCode("not_implemented", fmt.Errorf("--depth=%d is not supported; only --depth=1 (direct callers) is implemented", callersDepthFlag))
+	}
 	symbol := args[0]
 	if jsonOutputFlag {
 		cmd.SilenceUsage = true
