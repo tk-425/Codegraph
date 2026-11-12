@@ -26,6 +26,9 @@ func (r *RipgrepTier) Name() string {
 
 // Search uses ripgrep to find matches
 func (r *RipgrepTier) Search(ctx context.Context, opts SearchOptions) ([]SearchResult, error) {
+	if opts.ExactMatch || opts.Kind != "" {
+		return nil, &TierSkip{Tier: r.Name(), Reason: "text matches cannot satisfy --exact or --kind symbol filters"}
+	}
 	args := []string{
 		"--line-number",
 		"--column",

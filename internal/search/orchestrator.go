@@ -52,18 +52,36 @@ type TierFailure struct {
 	Err  error
 }
 
-// Search executes search across all tiers until results are found. Tier
-// failures are returned rather than printed; when no tier produced results
-// and any tier failed, the empty result is not reported as a success.
-func (o *Orchestrator) Search(ctx context.Context, opts SearchOptions) ([]SearchResult, []TierFailure, error) {
-	var failures []TierFailure
+// TierSkip records a tier intentionally ineligible for a query, not a failure.
+type TierSkip struct {
+	Tier   string `json:"tier"`
+	Reason string `json:"reason"`
+}
+
+func (s *TierSkip) Error() string { return s.Reason }
+
+// SearchReport keeps unsupported fallback semantics distinct from provider errors.
+type SearchReport struct {
+	Failures []TierFailure `json:"-"`
+	Skipped  []TierSkip    `json:"skipped_tiers"`
+}
+
+// Search executes tiers until results are found. A skipped tier cannot hide an
+// operational failure or turn text evidence into a filtered symbol match.
+func (o *Orchestrator) Search(ctx context.Context, opts SearchOptions) ([]SearchResult, SearchReport, error) {
+	var report SearchReport
 	for _, tier := range o.tiers {
 		if err := ctx.Err(); err != nil {
-			return nil, failures, err
+			return nil, report, err
 		}
 		results, err := tier.Search(ctx, opts)
 		if err != nil {
-			failures = append(failures, TierFailure{Tier: tier.Name(), Err: err})
+			var skip *TierSkip
+			if errors.As(err, &skip) {
+				report.Skipped = append(report.Skipped, *skip)
+			} else {
+				report.Failures = append(report.Failures, TierFailure{Tier: tier.Name(), Err: err})
+			}
 			continue
 		}
 
@@ -72,18 +90,18 @@ func (o *Orchestrator) Search(ctx context.Context, opts SearchOptions) ([]Search
 			if opts.Limit > 0 && len(results) > opts.Limit {
 				results = results[:opts.Limit]
 			}
-			return results, failures, nil
+			return results, report, nil
 		}
 	}
 
-	if len(failures) > 0 {
-		errs := make([]error, 0, len(failures))
-		for _, failure := range failures {
+	if len(report.Failures) > 0 {
+		errs := make([]error, 0, len(report.Failures))
+		for _, failure := range report.Failures {
 			errs = append(errs, fmt.Errorf("%s tier: %w", failure.Tier, failure.Err))
 		}
-		return nil, failures, errors.Join(errs...)
+		return nil, report, errors.Join(errs...)
 	}
-	return []SearchResult{}, nil, nil
+	return []SearchResult{}, report, nil
 }
 
 // SearchAll executes search across all tiers and merges results

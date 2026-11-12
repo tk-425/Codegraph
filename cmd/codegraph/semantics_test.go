@@ -121,6 +121,54 @@ func TestSearchCLITracer(t *testing.T) {
 	}
 }
 
+func TestSearchFilteredMissReportsSkippedFallback(t *testing.T) {
+	root := newSyntaxProject(t, map[string]string{
+		"source.go": "package fixture\n// OnlyTextMarker is not a declaration.\n",
+	})
+	requireBuild(t, root)
+	for _, filter := range []string{"--exact", "--kind=class"} {
+		result := runCLI(t, root, "search", "OnlyTextMarker", filter, "--json")
+		if result.exit != 0 {
+			t.Fatalf("filtered miss exit=%d: %s", result.exit, result.stderr)
+		}
+		if env := requireOneEnvelope(t, result); env.Count != 0 || len(env.Errors) != 0 {
+			t.Fatalf("filtered miss fabricated symbol results or failed: %s", result.stdout)
+		}
+		var env struct {
+			Metadata struct {
+				Search struct {
+					Skipped []struct{ Tier, Reason string } `json:"skipped_tiers"`
+				}
+			}
+		}
+		if err := json.Unmarshal(result.stdout, &env); err != nil {
+			t.Fatal(err)
+		}
+		if len(env.Metadata.Search.Skipped) != 1 || env.Metadata.Search.Skipped[0].Tier != "ripgrep" || env.Metadata.Search.Skipped[0].Reason == "" {
+			t.Fatalf("missing structured skip: %s", result.stdout)
+		}
+		if !strings.Contains(string(result.stderr), "skipped") {
+			t.Fatalf("missing stderr skip notice: %s", result.stderr)
+		}
+		human := runCLI(t, root, "search", "OnlyTextMarker", filter)
+		if human.exit != 0 || !strings.Contains(string(human.stderr), "skipped") || !strings.Contains(string(human.stdout), "No results") {
+			t.Fatalf("human filtered miss: exit=%d stdout=%s stderr=%s", human.exit, human.stdout, human.stderr)
+		}
+	}
+}
+
+func TestSearchRejectsNegativeLimitBeforeSetup(t *testing.T) {
+	root := t.TempDir()
+	requireErrorCode(t, runCLI(t, root, "search", "x", "--limit=-1", "--json"), "invalid_arguments")
+	human := runCLI(t, root, "search", "x", "--limit=-1")
+	if human.exit == 0 || !strings.Contains(string(human.stderr), "limit") {
+		t.Fatalf("negative limit: exit=%d stdout=%s stderr=%s", human.exit, human.stdout, human.stderr)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".codegraph")); !os.IsNotExist(err) {
+		t.Fatalf("invalid argument created project state: %v", err)
+	}
+}
+
 func fileDigest(t *testing.T, path string) [32]byte {
 	t.Helper()
 	content, err := os.ReadFile(path)
