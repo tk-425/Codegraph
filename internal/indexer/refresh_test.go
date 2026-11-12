@@ -224,9 +224,9 @@ func Caller() { Target() }
 func Orphan() {}
 `
 
-// T07: a change in the effective provider configuration invalidates the
-// affected language's extraction. The oracle is a tampered published row:
-// it only comes back when the refresh re-extracts.
+// T07: provider configuration changes re-extract unchanged bytes. Extraction
+// timestamps are the oracle: out-of-band row tampering now independently
+// invalidates quality, so it cannot serve as a provider-only control.
 func TestProviderConfigChangeReextracts(t *testing.T) {
 	p := newRefreshProject(t)
 	p.write(t, "source.go", goWithOrphan)
@@ -238,20 +238,17 @@ func TestProviderConfigChangeReextracts(t *testing.T) {
 		t.Fatalf("fixture did not publish Orphan: %+v", orphan)
 	}
 
-	// Tamper: a published row the next refresh keeps unless it re-extracts.
-	if err := p.database.InsertSymbol(&db.Symbol{
-		ID: "go:source.go#Deleted", Name: "Deleted", Kind: "function", File: orphan[0].File,
-		Line: 20, Column: 0, Language: "go", Source: "tree-sitter", CreatedAt: time.Now(),
-	}); err != nil {
-		t.Fatal(err)
+	before, err := p.database.GetFileMeta(orphan[0].File)
+	if err != nil || before == nil {
+		t.Fatalf("initial metadata: %+v, %v", before, err)
 	}
-	// Unchanged provider: the refresh skips the file and the tampered row
-	// stays, proving no re-extraction happened.
+	// Unchanged provider: the file's extraction time stays unchanged.
 	if err := p.build(t, false); err != nil {
 		t.Fatal(err)
 	}
-	if symbols := p.symbols(t, "Deleted"); len(symbols) != 1 {
-		t.Fatalf("control: unchanged provider re-extracted anyway: %+v", symbols)
+	unchanged, err := p.database.GetFileMeta(orphan[0].File)
+	if err != nil || unchanged == nil || !unchanged.ExtractedAt.Equal(before.ExtractedAt) {
+		t.Fatalf("control: unchanged provider re-extracted: before=%+v after=%+v error=%v", before, unchanged, err)
 	}
 
 	// A different effective server command changes the provider digest.
@@ -259,8 +256,9 @@ func TestProviderConfigChangeReextracts(t *testing.T) {
 	if err := p.build(t, false); err != nil {
 		t.Fatal(err)
 	}
-	if symbols := p.symbols(t, "Deleted"); len(symbols) != 0 {
-		t.Errorf("T07: changed provider configuration did not re-extract: %+v", symbols)
+	changed, err := p.database.GetFileMeta(orphan[0].File)
+	if err != nil || changed == nil || !changed.ExtractedAt.After(before.ExtractedAt) {
+		t.Errorf("T07: changed provider did not re-extract: before=%+v after=%+v error=%v", before, changed, err)
 	}
 	if symbols := p.symbols(t, "Orphan"); len(symbols) != 1 {
 		t.Errorf("T07: re-extraction lost Orphan: %+v", symbols)

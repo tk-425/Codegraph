@@ -36,10 +36,15 @@ func init() {
 }
 
 type callerRecord struct {
-	Name string `json:"name"`
-	Kind string `json:"kind"`
-	File string `json:"file"`
-	Line int    `json:"line"`
+	ID       string   `json:"id"`
+	Source   string   `json:"source"`
+	Origin   string   `json:"origin"`
+	Evidence []string `json:"evidence"`
+	Column   int      `json:"column"`
+	Name     string   `json:"name"`
+	Kind     string   `json:"kind"`
+	File     string   `json:"file"`
+	Line     int      `json:"line"`
 }
 
 func runCallers(cmd *cobra.Command, args []string) error {
@@ -50,11 +55,14 @@ func runCallers(cmd *cobra.Command, args []string) error {
 		return runCallersJSON(cmd, symbol)
 	}
 
-	cwd, _, dbManager, _, err := openProject()
+	cwd, _, dbManager, _, err := openProject(commandContext(cmd))
 	if err != nil {
 		return err
 	}
 	defer dbManager.Close()
+	if err := printQueryMetadata(cmd, dbManager); err != nil {
+		return err
+	}
 
 	// Parse languages filter
 	var languages []string
@@ -76,9 +84,9 @@ func runCallers(cmd *cobra.Command, args []string) error {
 	fmt.Printf("📞 Callers of %s (%s found):\n\n", Symbol(symbol), Info(len(callers)))
 	for _, c := range callers {
 		relPath, _ := filepath.Rel(cwd, c.CallFile)
-		fmt.Printf("  %s [%s]\n", Symbol(c.Name), Keyword(c.Kind))
+		fmt.Printf("  %s [%s] (%s; %s)\n", Symbol(c.Name), Keyword(c.Kind), c.Source, c.Evidence)
 		fmt.Printf("    %s\n", Path(fmt.Sprintf("%s:%d", relPath, c.CallLine)))
-		
+
 		// Show the actual source line
 		if line := getSourceLine(c.CallFile, c.CallLine); line != "" {
 			fmt.Printf("    %s\n", Dim(line))
@@ -96,7 +104,7 @@ func runCallersJSON(cmd *cobra.Command, symbol string) error {
 		return err
 	}
 
-	cwd, _, dbManager, code, err := openProject()
+	cwd, _, dbManager, code, err := openProject(commandContext(cmd))
 	if err != nil {
 		return emitErr(code, err)
 	}
@@ -119,6 +127,7 @@ func runCallersJSON(cmd *cobra.Command, symbol string) error {
 			relPath = c.CallFile
 		}
 		records = append(records, callerRecord{
+			ID: c.ID, Source: c.Source, Origin: "stored", Evidence: evidenceKinds(c.Evidence), Column: c.CallColumn,
 			Name: c.Name,
 			Kind: c.Kind,
 			File: relPath,
@@ -126,7 +135,11 @@ func runCallersJSON(cmd *cobra.Command, symbol string) error {
 		})
 	}
 
-	return EmitJSON(out, "callers", &symbol, records, nil)
+	metadata, err := queryMetadata(dbManager)
+	if err != nil {
+		return emitErr("callers_lookup_failed", err)
+	}
+	return EmitJSON(out, "callers", &symbol, records, nil, metadata)
 }
 
 // getSourceLine reads a specific line from a file

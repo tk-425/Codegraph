@@ -40,6 +40,34 @@ go build -o codegraph ./cmd/codegraph
 mv codegraph /usr/local/bin/
 ```
 
+### Upgrading from v0.9.0 (unreleased changes)
+
+Existing **format-2 indexes remain readable without a rebuild**. Symbol identities,
+call endpoints and existing stored fields keep their meanings. No `build --force`
+is required for this upgrade; see the [unreleased notes](CHANGELOG.md#unreleased).
+
+- Queries stay read-only. Before the first newer build, optional snapshot/attempt
+  metadata is unavailable, historical relationship evidence is `unknown`, and
+  freshness is `unchecked`. An unavailable publication time is not source mtime.
+- An ordinary `codegraph build` adds optional reporting tables, evidence columns
+  and persistent invalidation triggers. If trustworthy quality metadata is absent,
+  that build re-extracts current inputs to establish provenance; later unchanged
+  builds retain their publication ID and time.
+- v0.9.0 can still read and build an extended format-2 index. Its graph, manifest
+  and provider writes invalidate newer quality metadata instead of leaving stale
+  claims visible. Even an older no-op build may invalidate metadata because it
+  rewrites provider state. A subsequent ordinary newer build restores reporting.
+  A failed publication rolls back invalidation along with graph changes. If another
+  writer changes the stored graph during newer extraction, publication fails with
+  an explicit retry message rather than attaching claims to a concurrent graph.
+- This adds no stricter hierarchy uniqueness constraint that would reject an
+  older writer's duplicate inserts. Missing historical evidence is never invented.
+
+The previously considered format-3 bump was unnecessary: these are additive
+reporting fields, not changed graph identities. Recoverable transitions remain
+appropriate for genuinely incompatible formats (such as pre-format-2 indexes),
+not a reason to require rebuilding compatible ones.
+
 ### Recommended Tools (LSP)
 
 CodeGraph works best with Language Servers installed for precise call graphs and type hierarchies. If an LSP is not found, CodeGraph will **automatically fallback to Tree-sitter** for symbol extraction.

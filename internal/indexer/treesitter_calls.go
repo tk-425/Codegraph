@@ -223,6 +223,7 @@ func (c *CallExtractor) ExtractCalls(ctx context.Context, file FileInfo) (int, e
 			return
 		}
 		calls = append(calls, &db.Call{
+			Evidence: "tree-sitter-call",
 			CallerID: caller.ID,
 			CalleeID: target.symbol.ID,
 			File:     file.Path,
@@ -237,8 +238,7 @@ func (c *CallExtractor) ExtractCalls(ctx context.Context, file FileInfo) (int, e
 	count := 0
 	for _, call := range calls {
 		if err := c.store.InsertCall(call); err != nil {
-			// Skip duplicates
-			continue
+			return count, err
 		}
 		count++
 	}

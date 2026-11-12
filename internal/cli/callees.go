@@ -34,10 +34,15 @@ func init() {
 }
 
 type calleeRecord struct {
-	Name string `json:"name"`
-	Kind string `json:"kind"`
-	File string `json:"file"`
-	Line int    `json:"line"`
+	ID       string   `json:"id"`
+	Source   string   `json:"source"`
+	Origin   string   `json:"origin"`
+	Evidence []string `json:"evidence"`
+	Column   int      `json:"column"`
+	Name     string   `json:"name"`
+	Kind     string   `json:"kind"`
+	File     string   `json:"file"`
+	Line     int      `json:"line"`
 }
 
 func runCallees(cmd *cobra.Command, args []string) error {
@@ -48,11 +53,14 @@ func runCallees(cmd *cobra.Command, args []string) error {
 		return runCalleesJSON(cmd, symbol)
 	}
 
-	cwd, _, dbManager, _, err := openProject()
+	cwd, _, dbManager, _, err := openProject(commandContext(cmd))
 	if err != nil {
 		return err
 	}
 	defer dbManager.Close()
+	if err := printQueryMetadata(cmd, dbManager); err != nil {
+		return err
+	}
 
 	// Parse languages filter
 	var languages []string
@@ -74,9 +82,9 @@ func runCallees(cmd *cobra.Command, args []string) error {
 	fmt.Printf("📤 Callees of %s (%s found):\n\n", Symbol(symbol), Info(len(callees)))
 	for _, c := range callees {
 		relPath, _ := filepath.Rel(cwd, c.CallFile)
-		fmt.Printf("  %s [%s]\n", Symbol(c.Name), Keyword(c.Kind))
+		fmt.Printf("  %s [%s] (%s; %s)\n", Symbol(c.Name), Keyword(c.Kind), c.Source, c.Evidence)
 		fmt.Printf("    %s\n", Path(fmt.Sprintf("%s:%d", relPath, c.CallLine)))
-		
+
 		// Show the actual source line
 		if line := getSourceLine(c.CallFile, c.CallLine); line != "" {
 			fmt.Printf("    %s\n", Dim(line))
@@ -94,7 +102,7 @@ func runCalleesJSON(cmd *cobra.Command, symbol string) error {
 		return err
 	}
 
-	cwd, _, dbManager, code, err := openProject()
+	cwd, _, dbManager, code, err := openProject(commandContext(cmd))
 	if err != nil {
 		return emitErr(code, err)
 	}
@@ -117,6 +125,7 @@ func runCalleesJSON(cmd *cobra.Command, symbol string) error {
 			relPath = c.CallFile
 		}
 		records = append(records, calleeRecord{
+			ID: c.ID, Source: c.Source, Origin: "stored", Evidence: evidenceKinds(c.Evidence), Column: c.CallColumn,
 			Name: c.Name,
 			Kind: c.Kind,
 			File: relPath,
@@ -124,5 +133,9 @@ func runCalleesJSON(cmd *cobra.Command, symbol string) error {
 		})
 	}
 
-	return EmitJSON(out, "callees", &symbol, records, nil)
+	metadata, err := queryMetadata(dbManager)
+	if err != nil {
+		return emitErr("callees_lookup_failed", err)
+	}
+	return EmitJSON(out, "callees", &symbol, records, nil, metadata)
 }

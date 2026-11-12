@@ -43,6 +43,10 @@ func init() {
 }
 
 type searchRecord struct {
+	ID        string `json:"id,omitempty"`
+	Source    string `json:"source"`
+	Origin    string `json:"origin"`
+	Context   string `json:"context,omitempty"`
 	Name      string `json:"name"`
 	Kind      string `json:"kind"`
 	File      string `json:"file"`
@@ -59,11 +63,14 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		return runSearchJSON(cmd, symbol)
 	}
 
-	cwd, _, dbManager, _, err := openProject()
+	cwd, _, dbManager, _, err := openProject(commandContext(cmd))
 	if err != nil {
 		return err
 	}
 	defer dbManager.Close()
+	if err := printQueryMetadata(cmd, dbManager); err != nil {
+		return err
+	}
 
 	// Parse languages filter
 	var languages []string
@@ -105,7 +112,7 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			relPath = r.File
 		}
-		fmt.Printf("  %s [%s]\n", Symbol(r.Name), Keyword(r.Kind))
+		fmt.Printf("  %s [%s] (%s)\n", Symbol(r.Name), Keyword(r.Kind), r.Source)
 		fmt.Printf("    %s\n", Path(fmt.Sprintf("%s:%d", relPath, r.Line)))
 
 		// Show signature if available, otherwise show source line
@@ -130,7 +137,7 @@ func runSearchJSON(cmd *cobra.Command, symbol string) error {
 		return err
 	}
 
-	cwd, _, dbManager, code, err := openProject()
+	cwd, _, dbManager, code, err := openProject(commandContext(cmd))
 	if err != nil {
 		return emitErr(code, err)
 	}
@@ -165,7 +172,12 @@ func runSearchJSON(cmd *cobra.Command, symbol string) error {
 		if rerr != nil {
 			relPath = r.File
 		}
+		origin := "stored"
+		if r.Source == "ripgrep" {
+			origin = "text"
+		}
 		records = append(records, searchRecord{
+			ID: r.ID, Source: r.Source, Origin: origin, Context: r.Context,
 			Name:      r.Name,
 			Kind:      r.Kind,
 			File:      relPath,
@@ -175,7 +187,11 @@ func runSearchJSON(cmd *cobra.Command, symbol string) error {
 		})
 	}
 
-	return EmitJSON(out, "search", &symbol, records, nil)
+	metadata, err := queryMetadata(dbManager)
+	if err != nil {
+		return emitErr("search_failed", err)
+	}
+	return EmitJSON(out, "search", &symbol, records, nil, metadata)
 }
 
 // warnTierFailures reports tiers that failed before a later tier answered.

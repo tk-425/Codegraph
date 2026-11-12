@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"net/url"
@@ -14,8 +15,9 @@ import (
 
 // Manager handles database operations
 type Manager struct {
-	db     *sql.DB
-	dbPath string
+	db       sqlConnection
+	dbPath   string
+	readOnly bool
 }
 
 // busyTimeoutMS bounds how long a writer or reader waits on a lock
@@ -76,7 +78,7 @@ func OpenReadOnly(dbPath string) (*Manager, error) {
 		db.Close()
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
-	return &Manager{db: db, dbPath: dbPath}, nil
+	return &Manager{db: db, dbPath: dbPath, readOnly: true}, nil
 }
 
 // Initialize creates all tables and indexes. A database created here is
@@ -94,6 +96,9 @@ func (m *Manager) Initialize() error {
 		}
 	}
 	if err := m.addMissingFileMetaColumns(); err != nil {
+		return err
+	}
+	if err := m.addMissingEvidenceColumns(); err != nil {
 		return err
 	}
 	if existing == 0 {
@@ -197,22 +202,24 @@ func (m *Manager) InsertSymbol(s *Symbol) error {
 
 // InsertCall inserts a call relationship
 func (m *Manager) InsertCall(c *Call) error {
-	_, err := m.db.Exec(`
-		INSERT OR IGNORE INTO calls (caller_id, callee_id, file, line, column)
-		VALUES (?, ?, ?, ?, ?)`,
-		c.CallerID, c.CalleeID, c.File, c.Line, c.Column,
+	_, err := m.db.Exec(insertCallSQL,
+		c.CallerID, c.CalleeID, c.File, c.Line, c.Column, knownEvidence(c.Evidence),
 	)
 	return err
 }
 
 // InsertTypeHierarchy inserts a type relationship
 func (m *Manager) InsertTypeHierarchy(th *TypeHierarchy) error {
-	_, err := m.db.Exec(`
-		INSERT INTO type_hierarchy (child_id, parent_id, relationship)
-		VALUES (?, ?, ?)`,
-		th.ChildID, th.ParentID, th.Relationship,
-	)
-	return err
+	ctx := context.Background()
+	tx, err := m.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := insertHierarchy(ctx, tx.ExecContext, th); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // InsertUnresolved records an unresolved relationship site once.
@@ -268,8 +275,12 @@ func (m *Manager) GetImplementations(parentID string) ([]Symbol, error) {
 // by its name, optionally limited to languages. Embedding is not
 // implementation, so embeds relationships are excluded.
 func (m *Manager) GetImplementationsByName(typeName string, languages []string) ([]Symbol, error) {
+	evidence, err := m.evidenceColumn("type_hierarchy", "th")
+	if err != nil {
+		return nil, err
+	}
 	query := `
-		SELECT ` + symbolColumns("s") + `
+		SELECT ` + symbolColumns("s") + `, GROUP_CONCAT(DISTINCT ` + evidence + `)
 		FROM symbols s
 		INNER JOIN type_hierarchy th ON s.id = th.child_id
 		INNER JOIN symbols parent ON th.parent_id = parent.id
@@ -282,7 +293,7 @@ func (m *Manager) GetImplementationsByName(typeName string, languages []string) 
 			args = append(args, lang)
 		}
 	}
-	query += " ORDER BY s.file, s.line"
+	query += " GROUP BY s.id ORDER BY s.file, s.line"
 
 	rows, err := m.db.Query(query, args...)
 	if err != nil {
@@ -290,7 +301,15 @@ func (m *Manager) GetImplementationsByName(typeName string, languages []string) 
 	}
 	defer rows.Close()
 
-	return scanSymbols(rows)
+	var symbols []Symbol
+	for rows.Next() {
+		var symbol Symbol
+		if err := rows.Scan(append(symbol.scanTargets(), &symbol.RelationshipEvidence)...); err != nil {
+			return nil, err
+		}
+		symbols = append(symbols, symbol)
+	}
+	return symbols, rows.Err()
 }
 
 // SearchSymbols searches for symbols by name with optional filters
@@ -326,13 +345,18 @@ func (m *Manager) SearchSymbols(name string, kind string, languages []string) ([
 
 // GetCallers finds all callers of a symbol with call site info
 func (m *Manager) GetCallers(symbolName string, languages []string) ([]CallerInfo, error) {
+	evidence, err := m.evidenceColumn("calls", "c")
+	if err != nil {
+		return nil, err
+	}
 	// Match the callee symbol's name, never its ID encoding:
 	// - Exact match: main
 	// - Method with params: main(String[])
 	// - Qualified: Class.main(
 	query := `
 		SELECT ` + symbolColumns("s") + `,
-		       c.file as call_file, c.line as call_line, c.column as call_column
+		       c.file as call_file, c.line as call_line, c.column as call_column,
+		       GROUP_CONCAT(DISTINCT ` + evidence + `)
 		FROM symbols s
 		JOIN calls c ON s.id = c.caller_id
 		JOIN symbols callee ON c.callee_id = callee.id
@@ -363,7 +387,7 @@ func (m *Manager) GetCallers(symbolName string, languages []string) ([]CallerInf
 	var callers []CallerInfo
 	for rows.Next() {
 		var c CallerInfo
-		if err := rows.Scan(append(c.Symbol.scanTargets(), &c.CallFile, &c.CallLine, &c.CallColumn)...); err != nil {
+		if err := rows.Scan(append(c.Symbol.scanTargets(), &c.CallFile, &c.CallLine, &c.CallColumn, &c.Evidence)...); err != nil {
 			return nil, err
 		}
 		callers = append(callers, c)
@@ -373,13 +397,18 @@ func (m *Manager) GetCallers(symbolName string, languages []string) ([]CallerInf
 
 // GetCallees finds all callees of a symbol with call site info
 func (m *Manager) GetCallees(symbolName string, languages []string) ([]CalleeInfo, error) {
+	evidence, err := m.evidenceColumn("calls", "c")
+	if err != nil {
+		return nil, err
+	}
 	// Match caller names flexibly:
 	// - Exact match: main
 	// - Method with params: main(String[])
 	// - Qualified: Class.main
 	query := `
 		SELECT ` + symbolColumns("s") + `,
-		       c.file as call_file, c.line as call_line, c.column as call_column
+		       c.file as call_file, c.line as call_line, c.column as call_column,
+		       GROUP_CONCAT(DISTINCT ` + evidence + `)
 		FROM symbols s
 		JOIN calls c ON s.id = c.callee_id
 		JOIN symbols caller ON c.caller_id = caller.id
@@ -410,7 +439,7 @@ func (m *Manager) GetCallees(symbolName string, languages []string) ([]CalleeInf
 	var callees []CalleeInfo
 	for rows.Next() {
 		var c CalleeInfo
-		if err := rows.Scan(append(c.Symbol.scanTargets(), &c.CallFile, &c.CallLine, &c.CallColumn)...); err != nil {
+		if err := rows.Scan(append(c.Symbol.scanTargets(), &c.CallFile, &c.CallLine, &c.CallColumn, &c.Evidence)...); err != nil {
 			return nil, err
 		}
 		callees = append(callees, c)
@@ -792,18 +821,13 @@ func (m *Manager) GetDetailedStats() (*DetailedStats, error) {
 		})
 	}
 
-	// 5. Get last build time (max mod_time from file_meta)
-	var lastBuildStr sql.NullString
-	err = m.db.QueryRow("SELECT MAX(mod_time) FROM file_meta").Scan(&lastBuildStr)
+	// Publication time is independent of source mtime and extraction time.
+	snapshot, err := m.Snapshot()
 	if err != nil {
 		return nil, err
 	}
-	if lastBuildStr.Valid {
-		// Parse RFC3339 format
-		lastBuildTime, err := time.Parse(time.RFC3339, lastBuildStr.String)
-		if err == nil {
-			stats.LastBuildTime = &lastBuildTime
-		}
+	if snapshot != nil {
+		stats.LastBuildTime = &snapshot.PublishedAt
 	}
 
 	// 6. Get files indexed count

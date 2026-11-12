@@ -152,14 +152,23 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	}()
 
 	if err := idx.IndexProject(ctx, files, forceFlag); err != nil {
-		return failure("index_failed", fmt.Errorf("indexing failed: %w", err))
+		failureErr := failure("index_failed", fmt.Errorf("indexing failed: %w", err))
+		if jsonOutputFlag {
+			if writeErr := EmitJSON(cmd.OutOrStdout(), "build", nil, buildDiagnosticRecords(idx.Diagnostics()), []EnvelopeError{{Code: failureCode("index_failed", err), Message: failureErr.Error()}}, &OutputMetadata{Snapshot: idx.Snapshot(), Attempt: idx.Attempt(), Freshness: "unchecked"}); writeErr != nil {
+				return writeErr
+			}
+		}
+		return failureErr
 	}
 
 	diagnostics := idx.Diagnostics()
 	if jsonOutputFlag {
-		return EmitJSON(cmd.OutOrStdout(), "build", nil, buildDiagnosticRecords(diagnostics), nil)
+		return EmitJSON(cmd.OutOrStdout(), "build", nil, buildDiagnosticRecords(diagnostics), nil, &OutputMetadata{Snapshot: idx.Snapshot(), Attempt: idx.Attempt(), Freshness: "unchecked"})
 	}
 	printDiagnostics(os.Stdout, diagnostics)
+	if snapshot := idx.Snapshot(); snapshot != nil {
+		fmt.Fprintf(cmd.OutOrStdout(), "Snapshot %s: %s (freshness unchecked)\n", snapshot.ID, snapshot.Quality)
+	}
 	return nil
 }
 
