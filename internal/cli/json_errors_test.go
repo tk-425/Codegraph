@@ -203,14 +203,6 @@ func TestJSONErrors_NonJSONRegression(t *testing.T) {
 			run:   runImplementations, args: []string{"nope"},
 		},
 		{
-			name: "types", prefix: "🔗",
-			setup: func(t *testing.T) {
-				setupCodegraphProject(t)
-				jsonOutputFlag = false
-			},
-			run: runTypes, args: []string{"nope"},
-		},
-		{
 			name: "health", prefix: "🏥",
 			setup: func(t *testing.T) { setupCodegraphProject(t); jsonOutputFlag = false },
 			run:   runHealth, args: nil,
@@ -248,6 +240,23 @@ func TestJSONErrors_NonJSONRegression(t *testing.T) {
 				t.Errorf("first non-empty stdout line did not start with %q\nfirst line: %q\nRunE error: %v\nfull output:\n%s", tc.prefix, first, runErr, out)
 			}
 		})
+	}
+}
+
+func TestTypesHumanUnsupportedHasNoProgressOutput(t *testing.T) {
+	t.Chdir(t.TempDir())
+	jsonOutputFlag = false
+	t.Cleanup(func() { jsonOutputFlag = false })
+	cmd := &cobra.Command{Use: "types", RunE: runTypes}
+	var runErr error
+	out := captureStdout(t, func() {
+		runErr = cmd.RunE(cmd, []string{"Reader"})
+	})
+	if runErr == nil || errorCode(runErr) != "not_implemented" {
+		t.Fatalf("types returned %v, want not_implemented", runErr)
+	}
+	if out != "" {
+		t.Fatalf("unsupported types printed progress: %q", out)
 	}
 }
 

@@ -336,6 +336,51 @@ func TestCallQueriesRejectUnsupportedAndMalformedDepth(t *testing.T) {
 	}
 }
 
+func TestTypesAlwaysReportsUnsupported(t *testing.T) {
+	indexed := newSyntaxProject(t, map[string]string{"source.go": "package fixture\ntype Reader struct{}\n"})
+	requireBuild(t, indexed)
+	dbPath := filepath.Join(indexed, ".codegraph", "graphs", "codegraph.db")
+	before := fileDigest(t, dbPath)
+	for _, flags := range [][]string{
+		nil,
+		{"--supertypes"},
+		{"--subtypes"},
+		{"--supertypes", "--subtypes"},
+		{"--lang=go,java"},
+		{"--supertypes", "--subtypes", "--lang=go,java"},
+	} {
+		t.Run(strings.Join(flags, " "), func(t *testing.T) {
+			empty := t.TempDir()
+			for _, root := range []string{empty, indexed} {
+				args := append([]string{"types", "Reader"}, flags...)
+				result := runCLI(t, root, append(args, "--json")...)
+				env := requireErrorCode(t, result, "not_implemented")
+				if env.Command != "types" || env.Count != 0 || len(result.stderr) != 0 {
+					t.Fatalf("unexpected types envelope: stdout=%s stderr=%s", result.stdout, result.stderr)
+				}
+				var query struct{ Query string }
+				if err := json.Unmarshal(result.stdout, &query); err != nil {
+					t.Fatal(err)
+				}
+				if query.Query != "Reader" {
+					t.Fatalf("types lost its query: %s", result.stdout)
+				}
+				human := runCLI(t, root, args...)
+				if human.exit == 0 || len(human.stdout) != 0 || !bytes.Contains(human.stderr, []byte("types command not yet implemented")) {
+					t.Fatalf("human types: exit=%d stdout=%s stderr=%s", human.exit, human.stdout, human.stderr)
+				}
+			}
+			entries, err := os.ReadDir(empty)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("unsupported types created project artifacts: entries=%v err=%v", entries, err)
+			}
+		})
+	}
+	if fileDigest(t, dbPath) != before {
+		t.Fatal("unsupported types modified the published database")
+	}
+}
+
 func fileDigest(t *testing.T, path string) [32]byte {
 	t.Helper()
 	content, err := os.ReadFile(path)
