@@ -59,7 +59,7 @@ func runStats(cmd *cobra.Command, args []string) error {
 		return runStatsJSON(cmd)
 	}
 
-	cwd, _, dbManager, _, err := openProject()
+	cwd, _, dbManager, _, err := openProject(commandContext(cmd))
 	if err != nil {
 		return err
 	}
@@ -78,6 +78,9 @@ func runStats(cmd *cobra.Command, args []string) error {
 
 	// Default formatted output
 	printStats(stats, cwd)
+	if err := printQueryMetadata(cmd, dbManager); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -88,7 +91,7 @@ func runStatsJSON(cmd *cobra.Command) error {
 		return err
 	}
 
-	_, _, dbManager, code, err := openProject()
+	_, _, dbManager, code, err := openProject(commandContext(cmd))
 	if err != nil {
 		return emitErr(code, err)
 	}
@@ -124,7 +127,11 @@ func runStatsJSON(cmd *cobra.Command) error {
 		DatabaseSize:  stats.DatabaseSize,
 	}
 
-	return EmitJSON(out, "stats", nil, []statsRecord{rec}, nil)
+	metadata, err := queryMetadata(dbManager)
+	if err != nil {
+		return emitErr("stats_failed", err)
+	}
+	return EmitJSON(out, "stats", nil, []statsRecord{rec}, nil, metadata)
 }
 
 func printStats(stats *db.DetailedStats, projectPath string) {

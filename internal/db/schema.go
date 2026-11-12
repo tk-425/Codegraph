@@ -1,7 +1,7 @@
 package db
 
-// FormatVersion is the index format stored in PRAGMA user_version. Format 2
-// changed symbol identity; databases created earlier report 0.
+// FormatVersion identifies incompatible graph identities. Reporting metadata is
+// extended additively on the build path; format-2 readers and writers stay valid.
 const FormatVersion = 2
 
 // SQL statements for creating the database schema
@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS calls (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     caller_id TEXT NOT NULL,
     callee_id TEXT NOT NULL,
+    evidence TEXT NOT NULL DEFAULT 'unknown',
     file TEXT NOT NULL,
     line INTEGER NOT NULL,
     column INTEGER NOT NULL,
@@ -45,6 +46,7 @@ CREATE TABLE IF NOT EXISTS type_hierarchy (
     child_id TEXT NOT NULL,
     parent_id TEXT NOT NULL,
     relationship TEXT NOT NULL,
+    evidence TEXT NOT NULL DEFAULT 'unknown',
     FOREIGN KEY(child_id) REFERENCES symbols(id),
     FOREIGN KEY(parent_id) REFERENCES symbols(id)
 );`
@@ -108,21 +110,33 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_calls_site ON calls(caller_id, callee_id, 
 `
 )
 
+// Both direct extraction and transactional publication preserve the union of
+// evidence for one relationship, without creating duplicate graph records.
+const insertCallSQL = `INSERT INTO calls (caller_id, callee_id, file, line, column, evidence)
+VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(caller_id, callee_id, file, line, column) DO UPDATE SET
+ evidence = CASE WHEN instr(',' || calls.evidence || ',', ',' || excluded.evidence || ',') > 0
+ THEN calls.evidence ELSE calls.evidence || ',' || excluded.evidence END`
+
 // graphTables are the tables a format reset drops, children first.
-var graphTables = []string{"calls", "type_hierarchy", "unresolved_relationships", "symbols", "file_meta", "provider_state"}
+var graphTables = []string{"calls", "type_hierarchy", "unresolved_relationships", "symbols", "file_meta", "provider_state", "current_snapshot", "build_attempts", "quality_state"}
 
 // AllSchemaStatements returns all SQL statements needed to create the schema
 func AllSchemaStatements() []string {
-	return []string{
+	statements := []string{
 		CreateSymbolsTable,
 		CreateCallsTable,
 		CreateTypeHierarchyTable,
 		CreateUnresolvedTable,
 		CreateFileMetaTable,
 		CreateProviderStateTable,
+		createSnapshotTable,
+		createAttemptsTable,
+		createQualityStateTable,
 		CreateIndexes,
 		RepairCallsUniqueness,
 	}
+	return append(statements, qualityTriggerStatements()...)
 }
 
 // fileMetaColumns are the columns a format-2 database can be missing; they

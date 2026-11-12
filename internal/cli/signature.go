@@ -30,6 +30,9 @@ func init() {
 }
 
 type signatureRecord struct {
+	ID        string `json:"id"`
+	Source    string `json:"source"`
+	Origin    string `json:"origin"`
 	Name      string `json:"name"`
 	Kind      string `json:"kind"`
 	File      string `json:"file"`
@@ -46,11 +49,14 @@ func runSignature(cmd *cobra.Command, args []string) error {
 		return runSignatureJSON(cmd, symbol)
 	}
 
-	cwd, _, dbManager, _, err := openProject()
+	cwd, _, dbManager, _, err := openProject(commandContext(cmd))
 	if err != nil {
 		return err
 	}
 	defer dbManager.Close()
+	if err := printQueryMetadata(cmd, dbManager); err != nil {
+		return err
+	}
 
 	// Parse languages filter
 	var languages []string
@@ -82,7 +88,7 @@ func runSignature(cmd *cobra.Command, args []string) error {
 	for _, sym := range filtered {
 		relPath, _ := filepath.Rel(cwd, sym.File)
 
-		fmt.Printf("  %s [%s]\n", Symbol(sym.Name), Keyword(sym.Kind))
+		fmt.Printf("  %s [%s] (%s)\n", Symbol(sym.Name), Keyword(sym.Kind), sym.Source)
 		fmt.Printf("    %s\n", Path(fmt.Sprintf("%s:%d", relPath, sym.Line)))
 
 		// Show signature and source line
@@ -111,7 +117,7 @@ func runSignatureJSON(cmd *cobra.Command, symbol string) error {
 		return err
 	}
 
-	cwd, _, dbManager, code, err := openProject()
+	cwd, _, dbManager, code, err := openProject(commandContext(cmd))
 	if err != nil {
 		return emitErr(code, err)
 	}
@@ -137,6 +143,7 @@ func runSignatureJSON(cmd *cobra.Command, symbol string) error {
 			relPath = sym.File
 		}
 		records = append(records, signatureRecord{
+			ID: sym.ID, Source: sym.Source, Origin: "stored",
 			Name:      sym.Name,
 			Kind:      sym.Kind,
 			File:      relPath,
@@ -146,7 +153,11 @@ func runSignatureJSON(cmd *cobra.Command, symbol string) error {
 		})
 	}
 
-	return EmitJSON(out, "signature", &symbol, records, nil)
+	metadata, err := queryMetadata(dbManager)
+	if err != nil {
+		return emitErr("signature_lookup_failed", err)
+	}
+	return EmitJSON(out, "signature", &symbol, records, nil, metadata)
 }
 
 // colorizeSignature adds colors to a function signature

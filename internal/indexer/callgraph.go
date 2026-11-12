@@ -77,7 +77,7 @@ func (c *CallGraphIndexer) IndexCallGraph(ctx context.Context, language string) 
 		if !openedFiles[fileURI] {
 			content, err := os.ReadFile(sym.File)
 			if err != nil {
-				continue
+				return callCount, err
 			}
 			if err := client.DidOpenTextDocument(fileURI, language, string(content)); err != nil {
 				c.failures.add(client, err)
@@ -191,13 +191,14 @@ func (p *callPass) reference(ctx context.Context, callee db.Symbol, path string,
 		return false, p.store.InsertUnresolved(site)
 	}
 	err = p.store.InsertCall(&db.Call{
+		Evidence: "lsp-validated-reference",
 		CallerID: caller.ID,
 		CalleeID: callee.ID,
 		File:     path,
 		Line:     line,
 		Column:   column,
 	})
-	return err == nil, nil
+	return err == nil, err
 }
 
 // incoming stores the server's incoming calls to callee, one per call site.
@@ -239,9 +240,10 @@ func (p *callPass) incoming(ctx context.Context, client *lsp.Client, uri string,
 					}
 					continue
 				}
-				if err := p.store.InsertCall(&db.Call{CallerID: caller.ID, CalleeID: callee.ID, File: path, Line: siteLine, Column: siteColumn}); err == nil {
-					stored++
+				if err := p.store.InsertCall(&db.Call{Evidence: "lsp-call-hierarchy", CallerID: caller.ID, CalleeID: callee.ID, File: path, Line: siteLine, Column: siteColumn}); err != nil {
+					return stored, err
 				}
+				stored++
 			}
 		}
 	}

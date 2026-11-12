@@ -39,7 +39,7 @@ func runHealth(cmd *cobra.Command, args []string) error {
 	fmt.Printf("🏥 %s\n\n", Bold("Checking codegraph health..."))
 
 	// The same open sequence queries use, so health refuses what they refuse.
-	_, cfg, dbManager, failure := openSequence()
+	_, cfg, dbManager, failure := openSequence(commandContext(cmd))
 	if failure.at(stepCwd) {
 		return fmt.Errorf("failed to get current directory: %w", failure.err)
 	}
@@ -86,6 +86,15 @@ func runHealth(cmd *cobra.Command, args []string) error {
 		fmt.Printf("   Languages: %s\n", Keyword(stats.Languages))
 	}
 
+	metadata, err := queryMetadata(dbManager)
+	if err != nil {
+		fmt.Printf("❌ Snapshot: %v\n", err)
+	} else if metadata.Snapshot == nil {
+		fmt.Println("❌ Snapshot: unavailable; quality unknown; freshness unchecked")
+	} else {
+		fmt.Printf("Snapshot: %s (%s; freshness unchecked)\n", metadata.Snapshot.ID, metadata.Snapshot.Quality)
+	}
+
 	// Check LSP servers
 	fmt.Println()
 	fmt.Printf("🔧 %s\n", Bold("LSP Servers:"))
@@ -106,7 +115,7 @@ func runHealthJSON(cmd *cobra.Command) error {
 	out := cmd.OutOrStdout()
 	records := []healthRecord{}
 
-	_, cfg, dbManager, failure := openSequence()
+	_, cfg, dbManager, failure := openSequence(commandContext(cmd))
 	if failure.at(stepCwd) {
 		_ = EmitJSON(out, "health", nil, records, []EnvelopeError{{Code: "cwd_failed", Message: failure.err.Error()}})
 		return failure.err
@@ -144,6 +153,15 @@ func runHealthJSON(cmd *cobra.Command) error {
 	records = append(records, healthRecord{Category: "stats", Name: "calls", OK: true, Detail: fmt.Sprintf("%d", stats.CallCount)})
 	records = append(records, healthRecord{Category: "stats", Name: "files", OK: true, Detail: fmt.Sprintf("%d", stats.FileCount)})
 
+	metadata, metaErr := queryMetadata(dbManager)
+	quality := healthRecord{Category: "snapshot", Name: "quality", OK: false, Detail: "unavailable; quality unknown; freshness unchecked"}
+	if metaErr != nil {
+		quality.Detail = metaErr.Error()
+	} else if metadata.Snapshot != nil {
+		quality.OK = metadata.Snapshot.Quality == "complete"
+		quality.Detail = fmt.Sprintf("%s; %s; freshness unchecked", metadata.Snapshot.ID, metadata.Snapshot.Quality)
+	}
+	records = append(records, quality)
 	for lang, lspCfg := range cfg.LSP {
 		if _, err := exec.LookPath(lspCfg.Command); err != nil {
 			records = append(records, healthRecord{Category: "lsp", Name: lang, OK: false, Detail: lspCfg.Command + " not found"})
@@ -152,5 +170,5 @@ func runHealthJSON(cmd *cobra.Command) error {
 		}
 	}
 
-	return EmitJSON(out, "health", nil, records, nil)
+	return EmitJSON(out, "health", nil, records, nil, metadata)
 }

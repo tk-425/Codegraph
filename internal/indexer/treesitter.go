@@ -48,12 +48,7 @@ func (t *TreeSitterIndexer) IndexFileContent(ctx context.Context, file FileInfo,
 		return 0, fmt.Errorf("tree-sitter does not support language: %s", file.Language)
 	}
 
-	// Read file content
-	content, err := os.ReadFile(file.Path)
-	if err != nil {
-		return 0, fmt.Errorf("failed to read file: %w", err)
-	}
-
+	// Parse the exact bytes whose fingerprint the refresh supplied.
 	// Parse using tree-sitter
 	parser := sitter.NewParser()
 	parser.SetLanguage(lang)

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/tk-425/Codegraph/internal/config"
+	"github.com/tk-425/Codegraph/internal/db"
 )
 
 // Re-execute the test binary in a fresh process, entering the real main().
@@ -237,9 +238,67 @@ func TestJSONBuildInterruptReportsCancelledAndReapsServer(t *testing.T) {
 	if decoded.Command != "build" {
 		t.Errorf("command=%q, want build", decoded.Command)
 	}
+	quality := decodeQuality(t, cliResult{stdout.Bytes(), stderr.Bytes(), command.ProcessState.ExitCode()})
+	if quality.Metadata.Attempt == nil || quality.Metadata.Attempt.Outcome != "cancelled" {
+		t.Fatalf("cancelled attempt missing from output: %s", stdout.String())
+	}
+	manager, err := db.OpenReadOnly(cfg.GetDatabasePath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	attempt, err := manager.LatestAttempt()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempt == nil || attempt.Outcome != "cancelled" {
+		t.Fatalf("cancelled attempt not finalized: %+v", attempt)
+	}
 	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
 		_ = syscall.Kill(pid, syscall.SIGKILL)
 		t.Errorf("T35: language server %d survived the interrupted build (kill -0: %v)", pid, err)
+	}
+}
+
+// SC1: one real CLI invocation connects extraction, publication and output.
+func TestBuildSnapshotTracer(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.LSP["go"] = config.LSPConfig{Command: filepath.Join(root, "missing-lsp")}
+	if err := config.Save(root, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".codegraph", ".cgignore"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "source.go"), []byte("package fixture\nfunc Target() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result := runCLI(t, root, "build", "--json")
+	requireOneEnvelope(t, result)
+	if result.exit != 0 {
+		t.Fatalf("build failed: %s %s", result.stdout, result.stderr)
+	}
+	var output struct {
+		Metadata struct {
+			Snapshot  *db.Snapshot `json:"snapshot"`
+			Freshness string       `json:"freshness"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(result.stdout, &output); err != nil {
+		t.Fatal(err)
+	}
+	m, err := db.OpenReadOnly(cfg.GetDatabasePath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	stored, err := m.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored == nil || output.Metadata.Snapshot == nil || stored.ID == "" || stored.ID != output.Metadata.Snapshot.ID || output.Metadata.Freshness != "unchecked" {
+		t.Fatalf("output=%+v stored=%+v", output.Metadata, stored)
 	}
 }
 
