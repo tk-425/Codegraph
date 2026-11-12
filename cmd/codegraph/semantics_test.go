@@ -6,7 +6,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -166,6 +168,77 @@ func TestSearchRejectsNegativeLimitBeforeSetup(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, ".codegraph")); !os.IsNotExist(err) {
 		t.Fatalf("invalid argument created project state: %v", err)
+	}
+}
+
+func TestSearchTextUsesCodegraphEligibility(t *testing.T) {
+	if _, err := exec.LookPath("rg"); err != nil {
+		t.Skip("real ripgrep unavailable; CLI text eligibility not verified")
+	}
+	name := "space #é:line\nbreak.go"
+	root := newSyntaxProject(t, map[string]string{
+		name:          "package fixture\n// -literal[marker]\n",
+		"excluded.go": "package fixture\n// -literal[marker]\n",
+		"other.py":    "# -literal[marker]\n",
+		".git/HEAD":   "ref: refs/heads/main\n",
+		".gitignore":  "*.go\n",
+	})
+	if err := os.WriteFile(filepath.Join(root, ".codegraph", ".cgignore"), []byte("excluded.go\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	requireBuild(t, root)
+	dbPath := filepath.Join(root, ".codegraph", "graphs", "codegraph.db")
+	before := fileDigest(t, dbPath)
+	result := runCLI(t, root, "search", "--json", "--lang=go", "--limit=1", "--", "-literal[marker]")
+	if result.exit != 0 {
+		t.Fatalf("text query exit=%d stdout=%s stderr=%s", result.exit, result.stdout, result.stderr)
+	}
+	env := requireOneEnvelope(t, result)
+	if env.Count != 1 {
+		t.Fatalf("count=%d want 1: %s", env.Count, result.stdout)
+	}
+	var record struct {
+		ID, File, Kind, Source, Origin, Context, Language string
+		Line                                              int
+	}
+	if err := json.Unmarshal(env.Results[0], &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.ID != "" || record.File != name || record.Kind != "match" || record.Source != "ripgrep" || record.Origin != "text" || record.Language != "go" || record.Line != 2 || !strings.Contains(record.Context, "-literal[marker]") {
+		t.Fatalf("text eligibility/path/provenance mismatch: %+v", record)
+	}
+	if fileDigest(t, dbPath) != before {
+		t.Fatal("text fallback modified the published database")
+	}
+}
+
+func TestSearchStoredLimitsAndCaseCompatibility(t *testing.T) {
+	var source strings.Builder
+	source.WriteString("package fixture\n")
+	for i := 0; i < 25; i++ {
+		source.WriteString("func SearchLimit" + strconv.Itoa(i) + "() {}\n")
+	}
+	root := newSyntaxProject(t, map[string]string{"source.go": source.String()})
+	requireBuild(t, root)
+	for _, tc := range []struct {
+		args []string
+		want int
+	}{
+		{nil, 20},
+		{[]string{"--limit=1"}, 1},
+		{[]string{"--limit=0"}, 25},
+		{[]string{"--exact"}, 0},
+		{[]string{"--kind=class"}, 0},
+		{[]string{"--lang=python"}, 0},
+	} {
+		args := append([]string{"search", "searchlimit", "--json"}, tc.args...)
+		result := runCLI(t, root, args...)
+		if result.exit != 0 {
+			t.Fatalf("%v: exit=%d stdout=%s stderr=%s", args, result.exit, result.stdout, result.stderr)
+		}
+		if env := requireOneEnvelope(t, result); env.Count != tc.want {
+			t.Fatalf("%v: count=%d want=%d", args, env.Count, tc.want)
+		}
 	}
 }
 
