@@ -102,7 +102,7 @@ Examples:
 **Find Who Calls a Function**
 ```bash
 codegraph callers <symbol>                  # Direct callers
-codegraph callers <symbol> --depth=2        # 2 levels of callers
+codegraph callers <symbol> --depth=1        # Only supported depth
 codegraph callers <symbol> --lang=go        # Filter by language
 ```
 
@@ -113,13 +113,17 @@ Examples:
 **Find What a Function Calls**
 ```bash
 codegraph callees <symbol>                  # Direct callees
-codegraph callees <symbol> --depth=2        # 2 levels of callees
+codegraph callees <symbol> --depth=1        # Only supported depth
 codegraph callees <symbol> --lang=go        # Filter by language
 ```
 
 Examples:
 - "What does initialize call?"
 - "Trace what happens in handleRequest"
+
+Both commands query one hop only. Other integer depths fail; malformed depths
+are validation errors. `types` is not implemented and exits nonzero in both
+human and JSON modes, regardless of its direction/language flags.
 
 ### Diagnostics (Auto-Invoked)
 
@@ -147,7 +151,7 @@ codegraph projects
 ### Understanding New Code
 ```bash
 codegraph search main                    # Find entry point
-codegraph callees main --depth=2         # Trace execution
+codegraph callees main --depth=1         # Inspect direct callees
 codegraph search Handler --kind=class    # Explore components
 codegraph implementations Service        # Understand interfaces
 ```
@@ -163,7 +167,7 @@ codegraph callees processPayment         # Trace dependencies
 ### Bug Investigation
 ```bash
 codegraph search authenticate
-codegraph callers authenticate --depth=2  # Trace upstream
+codegraph callers authenticate --depth=1  # Inspect direct callers
 codegraph callees authenticate            # Trace downstream
 ```
 
@@ -183,7 +187,7 @@ Go, Python, TypeScript, JavaScript, Java, Rust, Swift, OCaml (with LSP integrati
 ## Best Practices
 
 1. **Start broad with search** - Find the symbol first, then drill down
-2. **Use depth wisely** - Start with `--depth=1`, increase only if needed
+2. **Use one-hop queries** - Only `--depth=1` is supported; multi-hop traversal is not implemented
 3. **Rebuild after major changes** - Keep index current with `codegraph build`
 4. **Check health when troubleshooting** - Run `codegraph health` first
 5. **Manual operations need explicit invocation** - `codegraph init` and `codegraph build` require user approval
@@ -192,7 +196,6 @@ Go, Python, TypeScript, JavaScript, Java, Rust, Swift, OCaml (with LSP integrati
 
 - `codegraph search`: < 1s (database lookup)
 - `codegraph callers --depth=1`: < 1s (single-level)
-- `codegraph callers --depth=3`: 1-3s (multi-level)
 - `codegraph stats`: < 1s (database aggregation)
 - `codegraph build`: 1-5s (incremental)
 - `codegraph build --force`: 10-60s (full reindex)

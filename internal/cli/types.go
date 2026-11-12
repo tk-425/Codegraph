@@ -14,10 +14,11 @@ var (
 
 var typesCmd = &cobra.Command{
 	Use:   "types <symbol>",
-	Short: "Find type hierarchy (superclasses/subclasses)",
-	Long: `Find the type hierarchy for a class or interface.
+	Short: "Type hierarchy (not implemented)",
+	Long: `Type hierarchy queries are not implemented and exit nonzero.
+No type hierarchy is queried. Direction and language flags are reserved.
 
-Examples:
+Examples (report unsupported):
   codegraph types ConfigManager --supertypes
   codegraph types BaseHandler --subtypes
   codegraph types Service --lang=go,java`,
