@@ -90,6 +90,37 @@ func TestBuildStoresReceiverMethodsAsDistinctSymbols(t *testing.T) {
 	}
 }
 
+// S4b.1 tracer: the real CLI preserves stored identity and provenance without
+// changing the published database while answering a filtered search.
+func TestSearchCLITracer(t *testing.T) {
+	root := newSyntaxProject(t, map[string]string{
+		"source.go": "package fixture\n\nfunc SearchTracer() {}\n",
+	})
+	requireBuild(t, root)
+	dbPath := filepath.Join(root, ".codegraph", "graphs", "codegraph.db")
+	before := fileDigest(t, dbPath)
+	result := runCLI(t, root, "search", "SearchTracer", "--exact", "--kind=function", "--lang=go", "--json")
+	if result.exit != 0 {
+		t.Fatalf("search exit=%d stdout=%s stderr=%s", result.exit, result.stdout, result.stderr)
+	}
+	env := requireOneEnvelope(t, result)
+	if env.Count != 1 {
+		t.Fatalf("count=%d, want one stored symbol: %s", env.Count, result.stdout)
+	}
+	var record struct {
+		ID, Name, Source, Origin, Kind, Language string
+	}
+	if err := json.Unmarshal(env.Results[0], &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.ID == "" || record.Name != "SearchTracer" || record.Source != "tree-sitter" || record.Origin != "stored" || record.Kind != "function" || record.Language != "go" {
+		t.Fatalf("stored result lost identity, filters or provenance: %+v", record)
+	}
+	if fileDigest(t, dbPath) != before {
+		t.Fatal("search modified the published database")
+	}
+}
+
 func fileDigest(t *testing.T, path string) [32]byte {
 	t.Helper()
 	content, err := os.ReadFile(path)
