@@ -48,6 +48,9 @@ type callerRecord struct {
 }
 
 func runCallers(cmd *cobra.Command, args []string) error {
+	if callersDepthFlag != 1 {
+		return withCode("not_implemented", fmt.Errorf("--depth=%d is not supported; only --depth=1 (direct callers) is implemented", callersDepthFlag))
+	}
 	symbol := args[0]
 	if jsonOutputFlag {
 		cmd.SilenceUsage = true

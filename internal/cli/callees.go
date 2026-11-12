@@ -46,6 +46,9 @@ type calleeRecord struct {
 }
 
 func runCallees(cmd *cobra.Command, args []string) error {
+	if calleesDepthFlag != 1 {
+		return withCode("not_implemented", fmt.Errorf("--depth=%d is not supported; only --depth=1 (direct callees) is implemented", calleesDepthFlag))
+	}
 	symbol := args[0]
 	if jsonOutputFlag {
 		cmd.SilenceUsage = true
