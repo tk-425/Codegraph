@@ -103,13 +103,19 @@ func TestRipgrepUnusualPathsAndData(t *testing.T) {
 
 func TestRipgrepBatchesAndLimits(t *testing.T) {
 	files := map[string]string{}
+	var names []string
 	for i := 0; i < 300; i++ {
-		files[fmt.Sprintf("%03d-%s.go", i, strings.Repeat("p", 100))] = "// BatchMarker\n// BatchMarker\n"
+		base := fmt.Sprintf("%03d-%s", i, strings.Repeat("p", 100))
+		files[base+".go"] = "// BatchMarker\n// BatchMarker\n"
+		files[base+"/nested.go"] = "// BatchMarker\n// BatchMarker\n"
+		// Scanner and rg sort paths by components, visiting this directory
+		// before its sibling whose basename continues with '.go'.
+		names = append(names, base+"/nested.go", base+".go")
 	}
 	root := textSearchProject(t, files, "")
-	for _, limit := range []int{0, 1, 301} {
+	for _, limit := range []int{0, 1, 601} {
 		results, err := NewRipgrepTier(root).Search(context.Background(), SearchOptions{Query: "BatchMarker", Limit: limit})
-		want := 600
+		want := len(names) * 2
 		if limit > 0 {
 			want = limit
 		}
@@ -117,7 +123,7 @@ func TestRipgrepBatchesAndLimits(t *testing.T) {
 			t.Fatalf("limit=%d count=%d want=%d err=%v", limit, len(results), want, err)
 		}
 		for i, result := range results {
-			name := fmt.Sprintf("%03d-%s.go", i/2, strings.Repeat("p", 100))
+			name := names[i/2]
 			if result.File != filepath.Join(root, name) || result.Line != i%2+1 {
 				t.Fatalf("unstable batch order at %d: file=%q line=%d", i, result.File, result.Line)
 			}

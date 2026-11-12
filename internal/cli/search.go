@@ -22,7 +22,13 @@ var searchCmd = &cobra.Command{
 	Short: "Search for symbols by name",
 	Long: `Search for symbols (functions, variables, classes, etc.) by name.
 
-Uses multi-tier search: database first, then ripgrep fallback.
+Uses literal substring matching in the database first, then literal text fallback
+only over scanner-eligible source files (.codegraph/.cgignore and --lang apply).
+--exact requires symbol-name equality; --exact or --kind skips text fallback on a
+stored miss and reports why. Text matches are not symbol definitions.
+
+Case behaviour is unchanged: database substring matching folds ASCII case;
+exact equality and text fallback are case-sensitive. --limit=0 is unlimited.
 
 Examples:
   codegraph search parseConfig
@@ -36,7 +42,7 @@ Examples:
 func init() {
 	searchCmd.Flags().StringVar(&searchKindFlag, "kind", "", "Filter by symbol kind (function, variable, class, interface, type, module)")
 	searchCmd.Flags().StringVar(&searchLangFlag, "lang", "", "Filter by language(s), comma-separated (e.g., go,python)")
-	searchCmd.Flags().IntVar(&searchLimitFlag, "limit", 20, "Max results to show")
+	searchCmd.Flags().IntVar(&searchLimitFlag, "limit", 20, "Max results to show (0 = unlimited; must be nonnegative)")
 	searchCmd.Flags().BoolVar(&searchExactFlag, "exact", false, "Require exact name match")
 	supportJSON(searchCmd)
 	rootCmd.AddCommand(searchCmd)
