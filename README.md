@@ -125,7 +125,7 @@ CodeGraph works best with Language Servers installed for precise call graphs and
 | :------------------- | :-------------------------------------------------------------- |
 | `init`               | Initialize codegraph in the current directory.                  |
 | `build`              | Update the index (incremental). Use `--force` for full rebuild. |
-| `search <query>`     | Search for symbols by name (fuzzy match).                       |
+| `search <query>`     | Literal symbol-name substring search, with eligible text fallback. |
 | `callers <symbol>`   | Find functions that call the specified symbol.                  |
 | `callees <symbol>`   | Find functions called by the specified symbol.                  |
 | `signature <symbol>` | Show function signature and documentation.                      |
@@ -140,6 +140,33 @@ Persistent flags, available on every command:
 | :------------- | :----------------------------------------------------------------------------------------------- |
 | `--json`       | Emit exactly one JSON envelope on stdout. Supported by `search`, `signature`, `callers`, `callees`, `implementations`, `types`, `health`, `stats`, `projects` and `build`. |
 | `--lsp-stderr` | Forward raw language-server standard error instead of discarding it. Also set by `CODEGRAPH_LSP_STDERR`. |
+
+### Search behaviour
+
+`search` treats names as literal data: SQL `%`/`_`, regex punctuation and leading
+hyphens do not become patterns or options. Put flags before `--` when a name starts
+with a hyphen, for example `codegraph search --json -- '-option-like-name'`.
+
+- `--exact` requires literal symbol-name equality, not qualified-name or method-pattern
+  lookup. `--kind` and `--lang` apply to exact and substring symbol searches alike.
+  Module/package declarations remain excluded unless `--kind=module` is requested.
+- A stored miss falls back to literal text only when neither `--exact` nor `--kind`
+  was requested. Otherwise the skip is explained on stderr and in JSON
+  `metadata.search.skipped_tiers` (`tier`, `reason`); it is not an operational error.
+- Text fallback uses the build scanner's supported files, default exclusions and
+  `.codegraph/.cgignore`, including negations. It does not substitute ripgrep's
+  `.gitignore` rules. Language filters use the scanner's stored language IDs:
+  for example, `.js` is `typescript`, and `.tsx`/`.jsx` are `typescriptreact`.
+- Existing case behaviour is preserved: stored substring search folds ASCII case
+  (not general Unicode case), while exact name equality and text fallback are
+  case-sensitive. Ripgrep configuration files cannot override the command's flags.
+- `--limit` defaults to 20; zero means unlimited and negative values fail validation.
+  Filters and file eligibility are applied before limiting results.
+
+Text results remain `kind: match`, `source: ripgrep`, `origin: text` with context;
+they are not symbol definitions and have no fabricated symbol ID. An empty eligible
+file set needs no ripgrep process; eligible-file searches require `rg` on PATH.
+Database reads do not rebuild or modify the index, and freshness remains unchecked.
 
 ### JSON output
 

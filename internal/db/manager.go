@@ -314,8 +314,23 @@ func (m *Manager) GetImplementationsByName(typeName string, languages []string) 
 
 // SearchSymbols searches for symbols by name with optional filters
 func (m *Manager) SearchSymbols(name string, kind string, languages []string) ([]Symbol, error) {
-	query := "SELECT " + symbolColumns("") + " FROM symbols WHERE name LIKE ?"
-	args := []interface{}{"%" + name + "%"}
+	return m.searchSymbols(name, kind, languages, false)
+}
+
+// SearchSymbolsExact applies the same filters to literal symbol-name equality.
+// Flexible lookups used by indexing and other commands remain separate.
+func (m *Manager) SearchSymbolsExact(name string, kind string, languages []string) ([]Symbol, error) {
+	return m.searchSymbols(name, kind, languages, true)
+}
+
+func (m *Manager) searchSymbols(name string, kind string, languages []string, exact bool) ([]Symbol, error) {
+	query := "SELECT " + symbolColumns("") + " FROM symbols WHERE name = ?"
+	args := []interface{}{name}
+	if !exact {
+		query = "SELECT " + symbolColumns("") + ` FROM symbols WHERE name LIKE ? ESCAPE '\'`
+		escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(name)
+		args[0] = "%" + escaped + "%"
+	}
 
 	if kind != "" {
 		query += " AND kind = ?"
@@ -332,7 +347,7 @@ func (m *Manager) SearchSymbols(name string, kind string, languages []string) ([
 		}
 	}
 
-	query += " ORDER BY name, file, line"
+	query += " ORDER BY name, file, line, column, id"
 
 	rows, err := m.db.Query(query, args...)
 	if err != nil {

@@ -22,7 +22,13 @@ var searchCmd = &cobra.Command{
 	Short: "Search for symbols by name",
 	Long: `Search for symbols (functions, variables, classes, etc.) by name.
 
-Uses multi-tier search: database first, then ripgrep fallback.
+Uses literal substring matching in the database first, then literal text fallback
+only over scanner-eligible source files (.codegraph/.cgignore and --lang apply).
+--exact requires symbol-name equality; --exact or --kind skips text fallback on a
+stored miss and reports why. Text matches are not symbol definitions.
+
+Case behaviour is unchanged: database substring matching folds ASCII case;
+exact equality and text fallback are case-sensitive. --limit=0 is unlimited.
 
 Examples:
   codegraph search parseConfig
@@ -36,7 +42,7 @@ Examples:
 func init() {
 	searchCmd.Flags().StringVar(&searchKindFlag, "kind", "", "Filter by symbol kind (function, variable, class, interface, type, module)")
 	searchCmd.Flags().StringVar(&searchLangFlag, "lang", "", "Filter by language(s), comma-separated (e.g., go,python)")
-	searchCmd.Flags().IntVar(&searchLimitFlag, "limit", 20, "Max results to show")
+	searchCmd.Flags().IntVar(&searchLimitFlag, "limit", 20, "Max results to show (0 = unlimited; must be nonnegative)")
 	searchCmd.Flags().BoolVar(&searchExactFlag, "exact", false, "Require exact name match")
 	supportJSON(searchCmd)
 	rootCmd.AddCommand(searchCmd)
@@ -56,6 +62,9 @@ type searchRecord struct {
 }
 
 func runSearch(cmd *cobra.Command, args []string) error {
+	if searchLimitFlag < 0 {
+		return withCode("invalid_arguments", fmt.Errorf("--limit must be nonnegative (0 means unlimited)"))
+	}
 	symbol := args[0]
 	if jsonOutputFlag {
 		cmd.SilenceUsage = true
@@ -95,11 +104,11 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	}
 
 	// Execute search
-	results, failures, err := orchestrator.Search(commandContext(cmd), opts)
+	results, report, err := orchestrator.Search(commandContext(cmd), opts)
+	warnSearchReport(cmd.ErrOrStderr(), report)
 	if err != nil {
 		return fmt.Errorf("search failed: %w", err)
 	}
-	warnTierFailures(cmd.ErrOrStderr(), failures)
 
 	if len(results) == 0 {
 		fmt.Printf("🔍 No results found for: %s\n", Warning(symbol))
@@ -132,8 +141,8 @@ func runSearch(cmd *cobra.Command, args []string) error {
 
 func runSearchJSON(cmd *cobra.Command, symbol string) error {
 	out := cmd.OutOrStdout()
-	emitErr := func(code string, err error) error {
-		_ = EmitJSON(out, "search", &symbol, []searchRecord{}, []EnvelopeError{{Code: code, Message: err.Error()}})
+	emitErr := func(code string, err error, metadata ...*OutputMetadata) error {
+		_ = EmitJSON(out, "search", &symbol, []searchRecord{}, []EnvelopeError{{Code: code, Message: err.Error()}}, metadata...)
 		return err
 	}
 
@@ -160,11 +169,11 @@ func runSearchJSON(cmd *cobra.Command, symbol string) error {
 		ExactMatch: searchExactFlag,
 	}
 
-	results, failures, err := orchestrator.Search(commandContext(cmd), opts)
+	results, report, err := orchestrator.Search(commandContext(cmd), opts)
+	warnSearchReport(cmd.ErrOrStderr(), report)
 	if err != nil {
-		return emitErr(failureCode("search_failed", err), fmt.Errorf("search failed: %w", err))
+		return emitErr(failureCode("search_failed", err), fmt.Errorf("search failed: %w", err), &OutputMetadata{Freshness: "unchecked", Search: &report})
 	}
-	warnTierFailures(cmd.ErrOrStderr(), failures)
 
 	records := make([]searchRecord, 0, len(results))
 	for _, r := range results {
@@ -191,13 +200,18 @@ func runSearchJSON(cmd *cobra.Command, symbol string) error {
 	if err != nil {
 		return emitErr("search_failed", err)
 	}
+	if len(report.Skipped) > 0 {
+		metadata.Search = &report
+	}
 	return EmitJSON(out, "search", &symbol, records, nil, metadata)
 }
 
-// warnTierFailures reports tiers that failed before a later tier answered.
-// Warnings go to stderr so stdout carries only the command's output.
-func warnTierFailures(w io.Writer, failures []search.TierFailure) {
-	for _, failure := range failures {
+// warnSearchReport keeps skipped fallbacks and provider errors off stdout.
+func warnSearchReport(w io.Writer, report search.SearchReport) {
+	for _, failure := range report.Failures {
 		fmt.Fprintf(w, "warning: %s search tier failed: %v\n", failure.Tier, failure.Err)
+	}
+	for _, skip := range report.Skipped {
+		fmt.Fprintf(w, "%s search tier skipped: %s\n", skip.Tier, skip.Reason)
 	}
 }

@@ -6,7 +6,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -87,6 +89,156 @@ func TestBuildStoresReceiverMethodsAsDistinctSymbols(t *testing.T) {
 	}
 	if got := userVersion(t, root); got != db.FormatVersion {
 		t.Errorf("user_version=%d, want %d", got, db.FormatVersion)
+	}
+}
+
+// S4b.1 tracer: the real CLI preserves stored identity and provenance without
+// changing the published database while answering a filtered search.
+func TestSearchCLITracer(t *testing.T) {
+	root := newSyntaxProject(t, map[string]string{
+		"source.go": "package fixture\n\nfunc SearchTracer() {}\n",
+	})
+	requireBuild(t, root)
+	dbPath := filepath.Join(root, ".codegraph", "graphs", "codegraph.db")
+	before := fileDigest(t, dbPath)
+	result := runCLI(t, root, "search", "SearchTracer", "--exact", "--kind=function", "--lang=go", "--json")
+	if result.exit != 0 {
+		t.Fatalf("search exit=%d stdout=%s stderr=%s", result.exit, result.stdout, result.stderr)
+	}
+	env := requireOneEnvelope(t, result)
+	if env.Count != 1 {
+		t.Fatalf("count=%d, want one stored symbol: %s", env.Count, result.stdout)
+	}
+	var record struct {
+		ID, Name, Source, Origin, Kind, Language string
+	}
+	if err := json.Unmarshal(env.Results[0], &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.ID == "" || record.Name != "SearchTracer" || record.Source != "tree-sitter" || record.Origin != "stored" || record.Kind != "function" || record.Language != "go" {
+		t.Fatalf("stored result lost identity, filters or provenance: %+v", record)
+	}
+	if fileDigest(t, dbPath) != before {
+		t.Fatal("search modified the published database")
+	}
+}
+
+func TestSearchFilteredMissReportsSkippedFallback(t *testing.T) {
+	root := newSyntaxProject(t, map[string]string{
+		"source.go": "package fixture\n// OnlyTextMarker is not a declaration.\n",
+	})
+	requireBuild(t, root)
+	for _, filter := range []string{"--exact", "--kind=class"} {
+		result := runCLI(t, root, "search", "OnlyTextMarker", filter, "--json")
+		if result.exit != 0 {
+			t.Fatalf("filtered miss exit=%d: %s", result.exit, result.stderr)
+		}
+		if env := requireOneEnvelope(t, result); env.Count != 0 || len(env.Errors) != 0 {
+			t.Fatalf("filtered miss fabricated symbol results or failed: %s", result.stdout)
+		}
+		var env struct {
+			Metadata struct {
+				Search struct {
+					Skipped []struct{ Tier, Reason string } `json:"skipped_tiers"`
+				}
+			}
+		}
+		if err := json.Unmarshal(result.stdout, &env); err != nil {
+			t.Fatal(err)
+		}
+		if len(env.Metadata.Search.Skipped) != 1 || env.Metadata.Search.Skipped[0].Tier != "ripgrep" || env.Metadata.Search.Skipped[0].Reason == "" {
+			t.Fatalf("missing structured skip: %s", result.stdout)
+		}
+		if !strings.Contains(string(result.stderr), "skipped") {
+			t.Fatalf("missing stderr skip notice: %s", result.stderr)
+		}
+		human := runCLI(t, root, "search", "OnlyTextMarker", filter)
+		if human.exit != 0 || !strings.Contains(string(human.stderr), "skipped") || !strings.Contains(string(human.stdout), "No results") {
+			t.Fatalf("human filtered miss: exit=%d stdout=%s stderr=%s", human.exit, human.stdout, human.stderr)
+		}
+	}
+}
+
+func TestSearchRejectsNegativeLimitBeforeSetup(t *testing.T) {
+	root := t.TempDir()
+	requireErrorCode(t, runCLI(t, root, "search", "x", "--limit=-1", "--json"), "invalid_arguments")
+	human := runCLI(t, root, "search", "x", "--limit=-1")
+	if human.exit == 0 || !strings.Contains(string(human.stderr), "limit") {
+		t.Fatalf("negative limit: exit=%d stdout=%s stderr=%s", human.exit, human.stdout, human.stderr)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".codegraph")); !os.IsNotExist(err) {
+		t.Fatalf("invalid argument created project state: %v", err)
+	}
+}
+
+func TestSearchTextUsesCodegraphEligibility(t *testing.T) {
+	if _, err := exec.LookPath("rg"); err != nil {
+		t.Skip("real ripgrep unavailable; CLI text eligibility not verified")
+	}
+	name := "space #é:line\nbreak.go"
+	root := newSyntaxProject(t, map[string]string{
+		name:          "package fixture\n// -literal[marker]\n",
+		"excluded.go": "package fixture\n// -literal[marker]\n",
+		"other.py":    "# -literal[marker]\n",
+		".git/HEAD":   "ref: refs/heads/main\n",
+		".gitignore":  "*.go\n",
+	})
+	if err := os.WriteFile(filepath.Join(root, ".codegraph", ".cgignore"), []byte("excluded.go\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	requireBuild(t, root)
+	dbPath := filepath.Join(root, ".codegraph", "graphs", "codegraph.db")
+	before := fileDigest(t, dbPath)
+	result := runCLI(t, root, "search", "--json", "--lang=go", "--limit=1", "--", "-literal[marker]")
+	if result.exit != 0 {
+		t.Fatalf("text query exit=%d stdout=%s stderr=%s", result.exit, result.stdout, result.stderr)
+	}
+	env := requireOneEnvelope(t, result)
+	if env.Count != 1 {
+		t.Fatalf("count=%d want 1: %s", env.Count, result.stdout)
+	}
+	var record struct {
+		ID, File, Kind, Source, Origin, Context, Language string
+		Line                                              int
+	}
+	if err := json.Unmarshal(env.Results[0], &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.ID != "" || record.File != name || record.Kind != "match" || record.Source != "ripgrep" || record.Origin != "text" || record.Language != "go" || record.Line != 2 || !strings.Contains(record.Context, "-literal[marker]") {
+		t.Fatalf("text eligibility/path/provenance mismatch: %+v", record)
+	}
+	if fileDigest(t, dbPath) != before {
+		t.Fatal("text fallback modified the published database")
+	}
+}
+
+func TestSearchStoredLimitsAndCaseCompatibility(t *testing.T) {
+	var source strings.Builder
+	source.WriteString("package fixture\n")
+	for i := 0; i < 25; i++ {
+		source.WriteString("func SearchLimit" + strconv.Itoa(i) + "() {}\n")
+	}
+	root := newSyntaxProject(t, map[string]string{"source.go": source.String()})
+	requireBuild(t, root)
+	for _, tc := range []struct {
+		args []string
+		want int
+	}{
+		{nil, 20},
+		{[]string{"--limit=1"}, 1},
+		{[]string{"--limit=0"}, 25},
+		{[]string{"--exact"}, 0},
+		{[]string{"--kind=class"}, 0},
+		{[]string{"--lang=python"}, 0},
+	} {
+		args := append([]string{"search", "searchlimit", "--json"}, tc.args...)
+		result := runCLI(t, root, args...)
+		if result.exit != 0 {
+			t.Fatalf("%v: exit=%d stdout=%s stderr=%s", args, result.exit, result.stdout, result.stderr)
+		}
+		if env := requireOneEnvelope(t, result); env.Count != tc.want {
+			t.Fatalf("%v: count=%d want=%d", args, env.Count, tc.want)
+		}
 	}
 }
 
