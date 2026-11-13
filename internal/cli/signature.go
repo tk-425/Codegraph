@@ -13,8 +13,13 @@ var signatureLangFlag string
 
 var signatureCmd = &cobra.Command{
 	Use:   "signature <symbol>",
-	Short: "Get the signature of a function or method",
-	Long: `Get the full signature of a function or method including parameters and return type.
+	Short: "Show stored signature information and documentation",
+	Long: `Show stored signature information and documentation for functions, methods and variables.
+
+Availability means stored content exists, not that a signature is complete. LSP detail
+may be partial; syntax extraction preserves declaration headers without inferring types.
+Missing signature information or documentation is marked unavailable. This read-only
+query never substitutes live source text or rebuilds the index.
 
 Examples:
   codegraph signature parseConfig
@@ -30,15 +35,18 @@ func init() {
 }
 
 type signatureRecord struct {
-	ID        string `json:"id"`
-	Source    string `json:"source"`
-	Origin    string `json:"origin"`
-	Name      string `json:"name"`
-	Kind      string `json:"kind"`
-	File      string `json:"file"`
-	Line      int    `json:"line"`
-	Language  string `json:"language"`
-	Signature string `json:"signature"`
+	ID                  string `json:"id"`
+	Source              string `json:"source"`
+	Origin              string `json:"origin"`
+	Name                string `json:"name"`
+	Kind                string `json:"kind"`
+	File                string `json:"file"`
+	Line                int    `json:"line"`
+	Language            string `json:"language"`
+	Signature           string `json:"signature"`
+	Documentation       string `json:"documentation"`
+	SignatureStatus     string `json:"signature_status"`
+	DocumentationStatus string `json:"documentation_status"`
 }
 
 func runSignature(cmd *cobra.Command, args []string) error {
@@ -70,44 +78,31 @@ func runSignature(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to find symbol: %w", err)
 	}
 
-	// Filter to only functions/methods (and variables for OCaml where functions are let-bindings)
-	var filtered []db.Symbol
-	for _, sym := range symbols {
-		if sym.Kind == "function" || sym.Kind == "method" || sym.Kind == "variable" {
-			filtered = append(filtered, sym)
+	records := signatureRecords(cwd, symbols)
+	if len(records) == 0 {
+		_, err := fmt.Fprintf(cmd.OutOrStdout(), "📝 No function/method/variable named '%s' found\n", Warning(symbol))
+		return err
+	}
+
+	var text strings.Builder
+	fmt.Fprintf(&text, "📝 Stored signature information for '%s' (%s found; completeness not guaranteed):\n\n", Symbol(symbol), Info(len(records)))
+	for _, record := range records {
+		fmt.Fprintf(&text, "  %s [%s] (%s)\n", Symbol(record.Name), Keyword(record.Kind), record.Source)
+		fmt.Fprintf(&text, "    %s\n", Path(fmt.Sprintf("%s:%d", record.File, record.Line)))
+		if record.SignatureStatus == "available" {
+			fmt.Fprintf(&text, "    Signature information: %s\n", Type(record.Signature))
+		} else {
+			fmt.Fprintln(&text, "    Signature information: unavailable")
 		}
-	}
-
-	if len(filtered) == 0 {
-		fmt.Printf("📝 No function/method named '%s' found\n", Warning(symbol))
-		return nil
-	}
-
-	fmt.Printf("📝 Signature for '%s' (%s found):\n\n", Symbol(symbol), Info(len(filtered)))
-
-	for _, sym := range filtered {
-		relPath, _ := filepath.Rel(cwd, sym.File)
-
-		fmt.Printf("  %s [%s] (%s)\n", Symbol(sym.Name), Keyword(sym.Kind), sym.Source)
-		fmt.Printf("    %s\n", Path(fmt.Sprintf("%s:%d", relPath, sym.Line)))
-
-		// Show signature and source line
-		sourceLine := getSourceLine(sym.File, sym.Line)
-		if sym.Signature != "" && strings.TrimSpace(sym.Signature) != "" {
-			// Show: signature → source
-			sig := strings.TrimSpace(sym.Signature)
-			if sourceLine != "" {
-				fmt.Printf("    %s → %s\n", Type(sig), Dim(sourceLine))
-			} else {
-				fmt.Printf("    %s\n", Type(sig))
-			}
-		} else if sourceLine != "" {
-			fmt.Printf("    %s\n", Dim(sourceLine))
+		if record.DocumentationStatus == "available" {
+			fmt.Fprintf(&text, "    Documentation: %s\n", record.Documentation)
+		} else {
+			fmt.Fprintln(&text, "    Documentation: unavailable")
 		}
-		fmt.Println()
+		fmt.Fprintln(&text)
 	}
-
-	return nil
+	_, err = fmt.Fprint(cmd.OutOrStdout(), text.String())
+	return err
 }
 
 func runSignatureJSON(cmd *cobra.Command, symbol string) error {
@@ -133,31 +128,42 @@ func runSignatureJSON(cmd *cobra.Command, symbol string) error {
 		return emitErr("signature_lookup_failed", fmt.Errorf("failed to find symbol: %w", err))
 	}
 
-	records := make([]signatureRecord, 0, len(symbols))
-	for _, sym := range symbols {
-		if sym.Kind != "function" && sym.Kind != "method" && sym.Kind != "variable" {
-			continue
-		}
-		relPath, rerr := filepath.Rel(cwd, sym.File)
-		if rerr != nil {
-			relPath = sym.File
-		}
-		records = append(records, signatureRecord{
-			ID: sym.ID, Source: sym.Source, Origin: "stored",
-			Name:      sym.Name,
-			Kind:      sym.Kind,
-			File:      relPath,
-			Line:      sym.Line,
-			Language:  sym.Language,
-			Signature: strings.TrimSpace(sym.Signature),
-		})
-	}
+	records := signatureRecords(cwd, symbols)
 
 	metadata, err := queryMetadata(dbManager)
 	if err != nil {
 		return emitErr("signature_lookup_failed", err)
 	}
 	return EmitJSON(out, "signature", &symbol, records, nil, metadata)
+}
+
+// signatureRecords keeps filtering and availability identical in both output modes.
+func signatureRecords(cwd string, symbols []db.Symbol) []signatureRecord {
+	records := make([]signatureRecord, 0, len(symbols))
+	for _, sym := range symbols {
+		// OCaml functions can be stored as variable let-bindings.
+		if sym.Kind != "function" && sym.Kind != "method" && sym.Kind != "variable" {
+			continue
+		}
+		relPath, err := filepath.Rel(cwd, sym.File)
+		if err != nil {
+			relPath = sym.File
+		}
+		record := signatureRecord{
+			ID: sym.ID, Source: sym.Source, Origin: "stored",
+			Name: sym.Name, Kind: sym.Kind, File: relPath, Line: sym.Line, Language: sym.Language,
+			Signature: strings.TrimSpace(sym.Signature), Documentation: strings.TrimSpace(sym.Documentation),
+			SignatureStatus: "unavailable", DocumentationStatus: "unavailable",
+		}
+		if record.Signature != "" {
+			record.SignatureStatus = "available"
+		}
+		if record.Documentation != "" {
+			record.DocumentationStatus = "available"
+		}
+		records = append(records, record)
+	}
+	return records
 }
 
 // colorizeSignature adds colors to a function signature

@@ -92,6 +92,68 @@ func TestBuildStoresReceiverMethodsAsDistinctSymbols(t *testing.T) {
 	}
 }
 
+// S4b.3 tracer: the real build/query path preserves known signature information
+// from the snapshot, even if the source on disk changes after publication.
+func TestSignatureCLITracer(t *testing.T) {
+	root := newSyntaxProject(t, map[string]string{
+		"source.go": "package fixture\n\nfunc SignatureTracer(\n input string,\n) bool { return input != \"\" }\n",
+	})
+	requireBuild(t, root)
+	dbPath := filepath.Join(root, ".codegraph", "graphs", "codegraph.db")
+	before := fileDigest(t, dbPath)
+	if err := os.WriteFile(filepath.Join(root, "source.go"), []byte("package fixture\n\nfunc ChangedOnDisk() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result := runCLI(t, root, "signature", "SignatureTracer", "--lang=go", "--json")
+	if result.exit != 0 {
+		t.Fatalf("signature exit=%d stdout=%s stderr=%s", result.exit, result.stdout, result.stderr)
+	}
+	env := requireOneEnvelope(t, result)
+	if env.Count != 1 {
+		t.Fatalf("count=%d, want one stored symbol: %s", env.Count, result.stdout)
+	}
+	var record struct {
+		ID, Name, Source, Origin, Kind, Language, Signature, Documentation string
+		SignatureStatus                                                    string `json:"signature_status"`
+		DocumentationStatus                                                string `json:"documentation_status"`
+	}
+	if err := json.Unmarshal(env.Results[0], &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.ID == "" || record.Name != "SignatureTracer" || record.Source != "tree-sitter" || record.Origin != "stored" || record.Kind != "function" || record.Language != "go" {
+		t.Fatalf("stored result lost identity, filters or provenance: %+v", record)
+	}
+	want := "func SignatureTracer(\n input string,\n) bool"
+	if record.Signature != want || record.SignatureStatus != "available" || record.Documentation != "" || record.DocumentationStatus != "unavailable" {
+		t.Fatalf("known stored signature/availability not preserved: %+v", record)
+	}
+	human := runCLI(t, root, "signature", "SignatureTracer", "--lang=go")
+	if human.exit != 0 || !strings.Contains(string(human.stdout), want) || !strings.Contains(string(human.stdout), "Documentation: unavailable") || strings.Contains(string(human.stdout), "ChangedOnDisk") {
+		t.Fatalf("human stored signature failed: exit=%d stdout=%s stderr=%s", human.exit, human.stdout, human.stderr)
+	}
+	for _, args := range [][]string{
+		{"signature", "MissingName", "--json"},
+		{"signature", "SignatureTracer", "--lang=rust", "--json"},
+	} {
+		empty := runCLI(t, root, args...)
+		env := requireOneEnvelope(t, empty)
+		if empty.exit != 0 || env.Count != 0 || len(env.Errors) != 0 || len(empty.stderr) != 0 {
+			t.Fatalf("expected valid empty result for %v: exit=%d stdout=%s stderr=%s", args, empty.exit, empty.stdout, empty.stderr)
+		}
+	}
+	emptyHuman := runCLI(t, root, "signature", "MissingName")
+	if emptyHuman.exit != 0 || !strings.Contains(string(emptyHuman.stdout), "No function/method/variable") {
+		t.Fatalf("empty human result: exit=%d stdout=%s stderr=%s", emptyHuman.exit, emptyHuman.stdout, emptyHuman.stderr)
+	}
+	help := runCLI(t, root, "signature", "--help")
+	if help.exit != 0 || !strings.Contains(string(help.stdout), "not that a signature is complete") || !strings.Contains(string(help.stdout), "marked unavailable") {
+		t.Fatalf("signature help overclaims: exit=%d stdout=%s stderr=%s", help.exit, help.stdout, help.stderr)
+	}
+	if fileDigest(t, dbPath) != before {
+		t.Fatal("signature queries modified the published database")
+	}
+}
+
 // S4b.1 tracer: the real CLI preserves stored identity and provenance without
 // changing the published database while answering a filtered search.
 func TestSearchCLITracer(t *testing.T) {

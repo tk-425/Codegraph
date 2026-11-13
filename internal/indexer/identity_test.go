@@ -89,6 +89,47 @@ func TestSameNameInDifferentLanguagesHasDistinctIdentities(t *testing.T) {
 	}
 }
 
+func TestSyntaxSignaturesRetainDeclarationHeaders(t *testing.T) {
+	for _, tc := range []struct {
+		name, language, filename, source, want string
+	}{
+		{"go", "go", "source.go", "package fixture\nfunc convert(\n input map[string]int,\n) (value int, ok bool) { return 0, false }", "func convert(\n input map[string]int,\n) (value int, ok bool)"},
+		{"go-method", "go", "source.go", "package fixture\ntype T struct{}\nfunc (*T) convert(\n input int,\n) int { return input }", "func (*T) convert(\n input int,\n) int"},
+		{"python", "python", "source.py", "def convert(\n value: int,\n) -> str:\n return str(value)\n", "def convert(\n value: int,\n) -> str:"},
+		{"swift", "swift", "source.swift", "func convert(\n value: Int\n) -> String { return String(value) }", "func convert(\n value: Int\n) -> String"},
+		{"typescript", "typescript", "source.ts", "function convert<T>(\n value: T,\n): {value: T} { return {value}; }", "function convert<T>(\n value: T,\n): {value: T}"},
+		{"typescript-method", "typescript", "source.ts", "class C { convert(\n value: number\n): number { return value; } }", "convert(\n value: number\n): number"},
+		{"javascript", "javascript", "source.js", "async function convert(\n value\n) { return value; }", "async function convert(\n value\n)"},
+		{"tsx", "typescriptreact", "source.tsx", "function convert(\n value: string\n): JSX.Element { return <div>{value}</div>; }", "function convert(\n value: string\n): JSX.Element"},
+		{"java", "java", "Source.java", "class C { public int convert(\n int value\n) throws Exception { return value; } }", "public int convert(\n int value\n) throws Exception"},
+		{"java-bodyless", "java", "Source.java", "interface C { int convert(\n int value\n); }", "int convert(\n int value\n);"},
+		{"rust", "rust", "source.rs", "fn convert(\n value: i32, callback: fn(i32) -> i32,\n) -> i32 { callback(value) }", "fn convert(\n value: i32, callback: fn(i32) -> i32,\n) -> i32"},
+		{"rust-unit", "rust", "source.rs", "fn convert() { let value = 1; }", "fn convert()"},
+		{"ocaml-binding", "ocaml", "source.ml", "let convert (x : int)\n (y : int) : int = x + y\n", "convert (x : int)\n (y : int) : int"},
+		{"ocaml-function-type", "ocaml", "source.ml", "let convert : (int -> int) -> int = fun f -> f 1\n", "convert : (int -> int) -> int"},
+		{"ocaml-val", "ocaml", "source.ml", "module type S = sig\nval convert : int ->\n string -> bool\nend\n", "val convert : int ->\n string -> bool"},
+		{"c", "c", "source.c", "int convert(\n int value\n) { return value; }", "int convert(\n int value\n)"},
+		{"cpp", "cpp", "source.cpp", "int convert(\n int value\n) noexcept { return value; }", "int convert(\n int value\n) noexcept"},
+		{"csharp", "csharp", "Source.cs", "class C { public int convert(\n int value\n) { return value; } }", "public int convert(\n int value\n)"},
+		{"csharp-expression", "csharp", "Source.cs", "class C { int convert(\n int value\n) => value + 1; }", "int convert(\n int value\n)"},
+		{"csharp-bodyless", "csharp", "Source.cs", "abstract class C { public abstract int convert(\n int value\n); }", "public abstract int convert(\n int value\n);"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database, _ := syntaxIndex(t, tc.filename, tc.language, tc.source)
+			symbols := symbolsNamed(t, database, "convert")
+			if len(symbols) != 1 {
+				t.Fatalf("want one stored declaration, got %+v", symbols)
+			}
+			if symbols[0].Signature != tc.want {
+				t.Errorf("signature=%q, want %q", symbols[0].Signature, tc.want)
+			}
+			if symbols[0].Documentation != "" || symbols[0].Source != "tree-sitter" {
+				t.Errorf("signature lost provider or fabricated documentation: %+v", symbols[0])
+			}
+		})
+	}
+}
+
 func TestGoReceiverNamesNormalize(t *testing.T) {
 	for _, name := range []string{"(First).Run", "(*First).Run", "(*First[K]).Run"} {
 		receiver, method, ok := splitGoReceiver(name)

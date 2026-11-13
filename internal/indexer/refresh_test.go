@@ -2,6 +2,8 @@ package indexer
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -262,6 +264,72 @@ func TestProviderConfigChangeReextracts(t *testing.T) {
 	}
 	if symbols := p.symbols(t, "Orphan"); len(symbols) != 1 {
 		t.Errorf("T07: re-extraction lost Orphan: %+v", symbols)
+	}
+}
+
+// R02: a valid prior-generation snapshot must refresh on an extractor change,
+// even when its source bytes and effective server configuration are unchanged.
+func TestExtractorRevisionRefreshesUnchangedSource(t *testing.T) {
+	p := newRefreshProject(t)
+	p.write(t, "source.go", "package fixture\nfunc Target(\n value int,\n) int { return value }\n")
+	if err := p.build(t, false); err != nil {
+		t.Fatal(err)
+	}
+	symbols := p.symbols(t, "Target")
+	if len(symbols) != 1 {
+		t.Fatalf("fixture needs Target: %+v", symbols)
+	}
+	meta, err := p.database.GetFileMeta(symbols[0].File)
+	if err != nil || meta == nil {
+		t.Fatalf("fixture file metadata=%+v error=%v", meta, err)
+	}
+	// Seed the published input contract from before extractor revisions existed.
+	server := p.cfg.LSP["go"]
+	legacyInput := fmt.Sprintf("format=%d;command=%s;args=%v;provider=tree-sitter", db.FormatVersion, server.Command, server.Args)
+	legacyDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(legacyInput)))
+	symbols[0].Signature = "func Target("
+	meta.ExtractedAt = time.Unix(1, 0)
+	plan := &db.RefreshPlan{
+		ChangedFiles: []string{meta.Path}, DirtyLanguages: []string{"go"},
+		Symbols: []*db.Symbol{&symbols[0]}, FileMeta: []db.FileMeta{*meta},
+		ProviderState: map[string]string{"go": legacyDigest},
+	}
+	if err := p.database.Publish(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := p.database.Snapshot()
+	if err != nil || legacy == nil {
+		t.Fatalf("prior-generation snapshot must be valid, not merely invalidated: %+v %v", legacy, err)
+	}
+	if err := p.build(t, false); err != nil {
+		t.Fatal(err)
+	}
+	refreshed := p.symbols(t, "Target")
+	if len(refreshed) != 1 || refreshed[0].Signature != "func Target(\n value int,\n) int" {
+		t.Fatalf("unchanged source retained prior extraction: %+v", refreshed)
+	}
+	afterMeta, err := p.database.GetFileMeta(meta.Path)
+	if err != nil || afterMeta == nil || !afterMeta.ExtractedAt.After(meta.ExtractedAt) || afterMeta.ContentHash != meta.ContentHash || !afterMeta.ModTime.Equal(meta.ModTime) {
+		t.Fatalf("extractor refresh changed inputs or skipped extraction: before=%+v after=%+v error=%v", meta, afterMeta, err)
+	}
+	digests, err := p.database.GetProviderDigests()
+	if err != nil || digests["go"] == legacyDigest || digests["go"] == "" {
+		t.Fatalf("extractor revision not recorded: %v %v", digests, err)
+	}
+	snapshot, err := p.database.Snapshot()
+	if err != nil || snapshot == nil || snapshot.ID == legacy.ID {
+		t.Fatalf("refresh did not publish: %+v %v", snapshot, err)
+	}
+	if err := p.build(t, false); err != nil {
+		t.Fatal(err)
+	}
+	unchanged, err := p.database.GetFileMeta(meta.Path)
+	if err != nil || unchanged == nil || !unchanged.ExtractedAt.Equal(afterMeta.ExtractedAt) {
+		t.Fatalf("same revision re-extracted: %+v %v", unchanged, err)
+	}
+	noOp, err := p.database.Snapshot()
+	if err != nil || noOp == nil || noOp.ID != snapshot.ID || !noOp.PublishedAt.Equal(snapshot.PublishedAt) {
+		t.Fatalf("no-op replaced publication: %+v %v", noOp, err)
 	}
 }
 
