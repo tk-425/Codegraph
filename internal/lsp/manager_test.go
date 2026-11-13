@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -25,6 +26,48 @@ func writeTypeScriptPackage(packageRoot, version string) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(bin, "tsc"), []byte("#!/bin/sh\n"), 0755)
+}
+
+func TestManagerUsesSharedServerSelection(t *testing.T) {
+	// No installed server may be launched. Native fixtures exit immediately;
+	// every other command is absent from this isolated PATH.
+	t.Setenv("PATH", t.TempDir())
+	for _, test := range []struct {
+		name, language, version string
+		override                bool
+	}{
+		{name: "configured Go", language: "go", version: "7.0.2"},
+		{name: "native TypeScript", language: "typescript", version: "7.0.2"},
+		{name: "native TSX", language: "typescriptreact", version: "7.0.2"},
+		{name: "wrapper", language: "typescript", version: "5.6.3"},
+		{name: "explicit TypeScript", language: "typescript", version: "7.0.2", override: true},
+		{name: "explicit TSX", language: "typescriptreact", version: "7.0.2", override: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := writeTypeScriptFixture(t, test.version, true)
+			cfg := config.DefaultConfig()
+			if test.override {
+				cfg.LSP[test.language] = config.LSPConfig{Command: "custom-server", Args: []string{"--stdio", "--workspace", "custom path"}}
+			}
+			want, err := ResolveServer(cfg, root, test.language)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manager := NewManager(cfg, PathToURI(root))
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if _, err := manager.GetClient(ctx, test.language); err == nil {
+				t.Fatal("absent or immediately exiting server unexpectedly initialized")
+			}
+			command, args, resolved := manager.Server(test.language)
+			if !resolved || command != want.Command || !slices.Equal(args, want.Args) {
+				t.Fatalf("manager selected %s %v resolved=%v, resolver selected %+v", command, args, resolved, want)
+			}
+			if err := manager.ShutdownAll(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
 }
 
 func TestManagerRetriesNativeInitializationAtMostThreeTimes(t *testing.T) {

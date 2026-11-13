@@ -5,15 +5,17 @@ import (
 	"os/exec"
 
 	"github.com/spf13/cobra"
+	"github.com/tk-425/Codegraph/internal/config"
+	"github.com/tk-425/Codegraph/internal/lsp"
 )
 
 var healthCmd = &cobra.Command{
 	Use:   "health",
-	Short: "Check the health of codegraph installation",
-	Long: `Check the health of codegraph by verifying:
-1. Database exists and is accessible
-2. Symbol and call counts
-3. Indexed languages`,
+	Short: "Check the current project's index and LSP availability",
+	Long: `Check the current project's configuration, read-only database access,
+indexed counts and snapshot quality, and effective LSP commands and arguments.
+LSP checks establish executable availability only: servers are not started,
+and initialization and capabilities remain unchecked.`,
 	RunE: runHealth,
 }
 
@@ -39,7 +41,7 @@ func runHealth(cmd *cobra.Command, args []string) error {
 	fmt.Printf("🏥 %s\n\n", Bold("Checking codegraph health..."))
 
 	// The same open sequence queries use, so health refuses what they refuse.
-	_, cfg, dbManager, failure := openSequence(commandContext(cmd))
+	projectRoot, cfg, dbManager, failure := openSequence(commandContext(cmd))
 	if failure.at(stepCwd) {
 		return fmt.Errorf("failed to get current directory: %w", failure.err)
 	}
@@ -98,13 +100,11 @@ func runHealth(cmd *cobra.Command, args []string) error {
 	// Check LSP servers
 	fmt.Println()
 	fmt.Printf("🔧 %s\n", Bold("LSP Servers:"))
-	for lang, lspCfg := range cfg.LSP {
-		// Check if command exists
-		_, err := exec.LookPath(lspCfg.Command)
-		if err != nil {
-			fmt.Printf("   ❌ %s: %s not found\n", Warning(lang), Error(lspCfg.Command))
+	for _, record := range lspHealthRecords(cfg, projectRoot) {
+		if record.OK {
+			fmt.Printf("   ✅ %s: %s\n", Keyword(record.Name), Dim(record.Detail))
 		} else {
-			fmt.Printf("   ✅ %s: %s\n", Keyword(lang), Dim(lspCfg.Command))
+			fmt.Printf("   ❌ %s: %s\n", Warning(record.Name), Error(record.Detail))
 		}
 	}
 
@@ -115,7 +115,7 @@ func runHealthJSON(cmd *cobra.Command) error {
 	out := cmd.OutOrStdout()
 	records := []healthRecord{}
 
-	_, cfg, dbManager, failure := openSequence(commandContext(cmd))
+	projectRoot, cfg, dbManager, failure := openSequence(commandContext(cmd))
 	if failure.at(stepCwd) {
 		_ = EmitJSON(out, "health", nil, records, []EnvelopeError{{Code: "cwd_failed", Message: failure.err.Error()}})
 		return failure.err
@@ -162,13 +162,30 @@ func runHealthJSON(cmd *cobra.Command) error {
 		quality.Detail = fmt.Sprintf("%s; %s; freshness unchecked", metadata.Snapshot.ID, metadata.Snapshot.Quality)
 	}
 	records = append(records, quality)
-	for lang, lspCfg := range cfg.LSP {
-		if _, err := exec.LookPath(lspCfg.Command); err != nil {
-			records = append(records, healthRecord{Category: "lsp", Name: lang, OK: false, Detail: lspCfg.Command + " not found"})
-		} else {
-			records = append(records, healthRecord{Category: "lsp", Name: lang, OK: true, Detail: lspCfg.Command})
-		}
-	}
+	records = append(records, lspHealthRecords(cfg, projectRoot)...)
 
 	return EmitJSON(out, "health", nil, records, nil, metadata)
+}
+
+// Availability is a lookup only; neither selection nor health starts a server.
+func lspHealthRecords(cfg *config.Config, projectRoot string) []healthRecord {
+	records := make([]healthRecord, 0, len(cfg.LSP))
+	const unchecked = "; initialization unchecked; capabilities unchecked"
+	for language := range cfg.LSP {
+		record := healthRecord{Category: "lsp", Name: language}
+		server, err := lsp.ResolveServer(cfg, projectRoot, language)
+		if err != nil {
+			record.Detail = "configuration: " + err.Error() + unchecked
+		} else {
+			detail := fmt.Sprintf("command=%q; args=%q; ", server.Command, server.Args)
+			if _, err := exec.LookPath(server.Command); err != nil {
+				record.Detail = detail + "executable unavailable: " + err.Error() + unchecked
+			} else {
+				record.OK = true
+				record.Detail = detail + "executable available" + unchecked
+			}
+		}
+		records = append(records, record)
+	}
+	return records
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -58,11 +59,20 @@ func lspHealth() ([]healthRecord, []string) {
 		"typescriptreact": "typescript-language-server", "java": "jdtls",
 		"swift": "sourcekit-lsp", "rust": "rust-analyzer", "ocaml": "ocamllsp",
 	}
-	records := []healthRecord{{Category: "lsp", Name: "go", OK: true, Detail: "gopls"}}
-	lines := []string{"   ✅ go: gopls"}
+	detail := "command=\"gopls\"; args=[\"serve\"]; executable available; initialization unchecked; capabilities unchecked"
+	records := []healthRecord{{Category: "lsp", Name: "go", OK: true, Detail: detail}}
+	lines := []string{"   ✅ go: " + detail}
 	for lang, command := range missing {
-		records = append(records, healthRecord{Category: "lsp", Name: lang, OK: false, Detail: command + " not found"})
-		lines = append(lines, "   ❌ "+lang+": "+command+" not found")
+		args := `["--stdio"]`
+		switch lang {
+		case "java":
+			args = `["-data" "/tmp/jdtls-workspace"]`
+		case "swift", "rust", "ocaml":
+			args = `[]`
+		}
+		detail := fmt.Sprintf("command=%q; args=%s; executable unavailable: exec: %q: executable file not found in $PATH; initialization unchecked; capabilities unchecked", command, args, command)
+		records = append(records, healthRecord{Category: "lsp", Name: lang, OK: false, Detail: detail})
+		lines = append(lines, "   ❌ "+lang+": "+detail)
 	}
 	return records, lines
 }

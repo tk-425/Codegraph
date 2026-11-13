@@ -18,37 +18,32 @@ const (
 	nativeTypeScriptArg      = "--lsp"
 )
 
-type typeScriptServer struct {
-	command string
-	args    []string
-	native  bool
+// ResolvedServer is the effective server selection, not an availability or
+// initialization result. Native marks the automatically selected TypeScript server.
+type ResolvedServer struct {
+	Command string
+	Args    []string
+	Native  bool
 }
 
-// resolveTypeScriptServer selects the TypeScript server for a project. The
-// generated wrapper configuration is automatic; any other command or args
-// remain an explicit project override.
-func resolveTypeScriptServer(cfg *config.Config, projectRoot, language string) (typeScriptServer, error) {
+// ResolveServer selects a configured language's server without starting it.
+// Only the automatic TypeScript wrapper configuration may select a local native
+// server; all other commands and arguments remain authoritative.
+func ResolveServer(cfg *config.Config, projectRoot, language string) (ResolvedServer, error) {
 	configured, ok := cfg.LSP[language]
-	if !ok && language == "typescriptreact" {
-		configured, ok = cfg.LSP["typescript"]
-	}
 	if !ok {
-		return typeScriptServer{}, fmt.Errorf("no LSP configuration for language: %s", language)
+		return ResolvedServer{}, fmt.Errorf("no LSP configuration for language: %s", language)
 	}
-
-	if !isAutomaticTypeScriptConfig(configured) {
-		return typeScriptServer{command: configured.Command, args: append([]string(nil), configured.Args...)}, nil
+	server := ResolvedServer{Command: configured.Command, Args: append([]string(nil), configured.Args...)}
+	if (language != "typescript" && language != "typescriptreact") || !isAutomaticTypeScriptConfig(configured) {
+		return server, nil
 	}
 
 	version, executable, err := discoverLocalTypeScript(projectRoot)
-	if err != nil || version.Major < 7 {
-		return typeScriptServer{command: configured.Command, args: append([]string(nil), configured.Args...)}, nil
+	if err != nil || version.Major < 7 || executable == "" {
+		return server, nil
 	}
-	if executable == "" {
-		return typeScriptServer{command: configured.Command, args: append([]string(nil), configured.Args...)}, nil
-	}
-
-	return typeScriptServer{command: executable, args: []string{nativeTypeScriptArg, defaultTypeScriptArg}, native: true}, nil
+	return ResolvedServer{Command: executable, Args: []string{nativeTypeScriptArg, defaultTypeScriptArg}, Native: true}, nil
 }
 
 func isAutomaticTypeScriptConfig(cfg config.LSPConfig) bool {
