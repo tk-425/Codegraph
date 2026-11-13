@@ -128,7 +128,7 @@ CodeGraph works best with Language Servers installed for precise call graphs and
 | `search <query>`     | Literal symbol-name substring search, with eligible text fallback. |
 | `callers <symbol>`   | Find direct callers (one hop only).                             |
 | `callees <symbol>`   | Find direct callees (one hop only).                             |
-| `signature <symbol>` | Show function signature and documentation.                      |
+| `signature <symbol>` | Show stored signature information/documentation and availability. |
 | `implementations`    | Find implementations of an interface/class.                     |
 | `types <symbol>`     | Not implemented; exits nonzero in human and JSON modes.         |
 | `projects`           | List all projects tracked in the global registry.               |
@@ -168,6 +168,27 @@ Text results remain `kind: match`, `source: ripgrep`, `origin: text` with contex
 they are not symbol definitions and have no fabricated symbol ID. An empty eligible
 file set needs no ripgrep process; eligible-file searches require `rg` on PATH.
 Database reads do not rebuild or modify the index, and freshness remains unchecked.
+
+### Signature information
+
+`signature <symbol> [--lang=a,b]` reports stored information for matching functions,
+methods and variables (including OCaml let-bindings). Available information is not a
+promise of a complete signature: LSP `detail` is optional and can be partial. Syntax
+extraction retains multiline declaration headers and known type annotations without
+implementation bodies; it does not infer missing types or documentation.
+
+JSON preserves the existing `signature` string and adds `documentation`,
+`signature_status` and `documentation_status`. Each status is `available` when the
+corresponding trimmed stored string is nonempty, otherwise `unavailable`. A partial
+provider detail is still available content, not a completeness claim. Human output
+also labels missing information explicitly. Neither output substitutes live source
+text for the stored snapshot. Documentation is unavailable when the extractor did
+not supply it; this command does not start a live LSP lookup.
+
+Queries do not repair historical truncated signatures or rebuild the index. The next
+explicitly requested ordinary `build` refreshes prior extractor output even when the
+source bytes are unchanged. Existing format-2 indexes remain readable; freshness is
+still unchecked, and a valid empty query remains a successful result.
 
 ### Call-query depth and unsupported types
 

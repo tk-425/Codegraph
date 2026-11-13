@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/tk-425/Codegraph/internal/config"
@@ -582,13 +581,16 @@ func fingerprint(content []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// Increment when extraction semantics change without changing the index format.
+const extractorRevision = 1
+
 // providerDigest fingerprints what extraction under language depends on:
 // the index format's identity version, the resolved server command and
 // arguments (recorded even when its startup failed), and — when a server
 // is live — the capabilities that shape extraction (R02).
 func providerDigest(language string, mgr *lsp.Manager, client *lsp.Client) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "format=%d", db.FormatVersion)
+	fmt.Fprintf(h, "format=%d;extractor=%d", db.FormatVersion, extractorRevision)
 	if command, args, ok := mgr.Server(language); ok {
 		fmt.Fprintf(h, ";command=%s;args=%v", command, args)
 	} else {
@@ -738,16 +740,17 @@ func (i *Indexer) storeSymbols(store graphStore, doc *lspDocument, symbols []lsp
 
 		// Create database symbol
 		dbSym := &db.Symbol{
-			ID:            doc.ids.assign(key),
-			Name:          key.Name,
-			Kind:          lsp.SymbolKindToString(sym.Kind),
-			File:          file.Path,
-			Line:          line,
-			Column:        column,
-			EndLine:       intPtr(endLine),
-			EndColumn:     intPtr(endColumn),
-			Scope:         key.Scope(),
-			Signature:     extractReturnType(sym.Detail, file.Language),
+			ID:        doc.ids.assign(key),
+			Name:      key.Name,
+			Kind:      lsp.SymbolKindToString(sym.Kind),
+			File:      file.Path,
+			Line:      line,
+			Column:    column,
+			EndLine:   intPtr(endLine),
+			EndColumn: intPtr(endColumn),
+			Scope:     key.Scope(),
+			// Detail is optional provider text, not necessarily a complete signature.
+			Signature:     sym.Detail,
 			Documentation: "",
 			Language:      file.Language,
 			Source:        "lsp",
@@ -780,33 +783,4 @@ func (i *Indexer) Close() error {
 
 func intPtr(i int) *int {
 	return &i
-}
-
-// extractReturnType extracts just the return type from a full function signature
-// For Rust: "fn(&self, a: f64, b: f64) -> f64" -> "f64"
-// For Java: ": double" -> "double"
-func extractReturnType(signature, language string) string {
-	if signature == "" {
-		return ""
-	}
-
-	switch language {
-	case "rust":
-		// Rust format: fn(...) -> ReturnType
-		if _, after, ok := strings.Cut(signature, "->"); ok {
-			return strings.TrimSpace(after)
-		}
-		// No return type means ()
-		if strings.HasPrefix(signature, "fn(") {
-			return "()"
-		}
-	case "java":
-		// Java LSP returns ": returnType" format (sometimes with leading space)
-		trimmed := strings.TrimSpace(signature)
-		if strings.HasPrefix(trimmed, ":") {
-			return strings.TrimSpace(strings.TrimPrefix(trimmed, ":"))
-		}
-	}
-
-	return signature
 }
