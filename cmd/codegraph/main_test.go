@@ -110,6 +110,54 @@ func requireOneEnvelope(t *testing.T, result cliResult) envelope {
 	return decoded
 }
 
+// TestHealthCLITracer reaches the real command through a compatible database,
+// with a missing executable reported as a diagnostic rather than a CLI failure.
+func TestHealthCLITracer(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.DefaultConfig()
+	missing := filepath.Join(root, "missing-gopls")
+	cfg.LSP["go"] = config.LSPConfig{Command: missing, Args: []string{"serve"}}
+	if err := config.Save(root, cfg); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := db.NewManager(cfg.GetDatabasePath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Initialize(); err != nil {
+		_ = manager.Close()
+		t.Fatal(err)
+	}
+	if err := manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	result := runCLI(t, root, "health", "--json")
+	output := requireOneEnvelope(t, result)
+	if result.exit != 0 || len(result.stderr) != 0 || output.Command != "health" || len(output.Errors) != 0 {
+		t.Fatalf("health: exit=%d stdout=%s stderr=%s", result.exit, result.stdout, result.stderr)
+	}
+	found := false
+	for _, raw := range output.Results {
+		var record struct {
+			Category, Name, Detail string
+			OK                     bool
+		}
+		if err := json.Unmarshal(raw, &record); err != nil {
+			t.Fatal(err)
+		}
+		if record.Category == "lsp" && record.Name == "go" {
+			if found || record.OK || !strings.Contains(record.Detail, missing) {
+				t.Fatalf("missing executable diagnostic: %+v", record)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no Go executable diagnostic: %s", result.stdout)
+	}
+}
+
 func requireErrorCode(t *testing.T, result cliResult, code string) envelope {
 	t.Helper()
 	if result.exit == 0 {
