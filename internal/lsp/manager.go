@@ -23,7 +23,7 @@ type Manager struct {
 	unavailable map[string]error
 	// servers records the server each GetClient resolution selected, even
 	// when its startup then failed: the effective provider identity.
-	servers map[string]typeScriptServer
+	servers map[string]ResolvedServer
 }
 
 const nativeTypeScriptMaxAttempts = 3
@@ -49,7 +49,7 @@ func NewManager(cfg *config.Config, rootURI string) *Manager {
 		clients:     make(map[string]*Client),
 		diagnostics: make(map[string]LSPDiagnostic),
 		unavailable: make(map[string]error),
-		servers:     make(map[string]typeScriptServer),
+		servers:     make(map[string]ResolvedServer),
 	}
 }
 
@@ -64,7 +64,7 @@ func (m *Manager) Server(language string) (command string, args []string, resolv
 	if !ok {
 		return "", nil, false
 	}
-	return server.command, server.args, true
+	return server.Command, server.Args, true
 }
 
 // GetClient gets or creates an LSP client for a language
@@ -86,36 +86,23 @@ func (m *Manager) GetClient(ctx context.Context, language string) (*Client, erro
 		return client, nil
 	}
 
-	// Resolve the configured server. TypeScript and TypeScript React may use
-	// the project-local native server when automatic configuration is active.
-	lspConfig, ok := m.cfg.LSP[language]
-	if !ok {
-		err := fmt.Errorf("no LSP configuration for language: %s", language)
+	server, err := ResolveServer(m.cfg, projectRootFromURI(m.rootURI), language)
+	if err != nil {
 		m.diagnostics[language] = newDiagnostic(language, "", projectRootFromURI(m.rootURI), err, false)
 		m.unavailable[language] = err
 		return nil, err
-	}
-	server := typeScriptServer{command: lspConfig.Command, args: lspConfig.Args}
-	if language == "typescript" || language == "typescriptreact" {
-		resolved, resolveErr := resolveTypeScriptServer(m.cfg, projectRootFromURI(m.rootURI), language)
-		if resolveErr != nil {
-			m.diagnostics[language] = newDiagnostic(language, server.command, projectRootFromURI(m.rootURI), resolveErr, m.cfg.IsExplicitLSPOverride(language))
-			m.unavailable[language] = resolveErr
-			return nil, resolveErr
-		}
-		server = resolved
 	}
 	// The effective server identity outlives the startup attempt: the
 	// refresh fingerprints what was selected, succeeded or not.
 	m.servers[language] = server
 
 	attempts := 1
-	if server.native {
+	if server.Native {
 		attempts = nativeTypeScriptMaxAttempts
 	}
 	var lastErr error
 	for attempt := 1; attempt <= attempts; attempt++ {
-		client, err := newLSPClient(server.command, server.args, m.rootURI, language)
+		client, err := newLSPClient(server.Command, server.Args, m.rootURI, language)
 		if err == nil {
 			client.requestTimeout = m.cfg.LSPTimeouts.Request()
 			client.gracefulTimeout = m.cfg.LSPTimeouts.ShutdownGraceful()
@@ -138,9 +125,9 @@ func (m *Manager) GetClient(ctx context.Context, language string) (*Client, erro
 		}
 	}
 
-	diagnostic := newDiagnostic(language, server.command, projectRootFromURI(m.rootURI), lastErr, m.cfg.IsExplicitLSPOverride(language))
+	diagnostic := newDiagnostic(language, server.Command, projectRootFromURI(m.rootURI), lastErr, m.cfg.IsExplicitLSPOverride(language))
 	m.diagnostics[language] = diagnostic
-	err := fmt.Errorf("failed to initialize LSP for %s: %w", language, lastErr)
+	err = fmt.Errorf("failed to initialize LSP for %s: %w", language, lastErr)
 	m.unavailable[language] = err
 	return nil, err
 }
