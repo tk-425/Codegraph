@@ -92,7 +92,7 @@ func DefaultConfig() *Config {
 			},
 			"java": {
 				Command: "jdtls",
-				Args:    []string{"-data", "/tmp/jdtls-workspace"},
+				Args:    []string{},
 			},
 			"swift": {
 				Command: "sourcekit-lsp",

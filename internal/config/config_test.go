@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -106,6 +107,43 @@ func TestSaveIfAbsentReportsCreationFailure(t *testing.T) {
 	data, err := os.ReadFile(path)
 	if err != nil || string(data) != "not a directory" {
 		t.Fatalf("blocking file changed: data=%q err=%v", data, err)
+	}
+}
+
+func TestJavaConfigurationPreservesWorkspacePolicy(t *testing.T) {
+	for _, test := range []struct {
+		name, body, command string
+		args                []string
+	}{
+		{name: "defaults", command: "jdtls"},
+		{name: "automatic", body: "[lsp.java]\ncommand = 'jdtls'\nargs = []\n", command: "jdtls"},
+		{name: "legacy shared workspace", body: "[lsp.java]\ncommand = 'jdtls'\nargs = ['-data', '/tmp/jdtls-workspace']\n", command: "jdtls", args: []string{"-data", "/tmp/jdtls-workspace"}},
+		{name: "custom workspace", body: "[lsp.java]\ncommand = 'jdtls'\nargs = ['-data', 'custom workspace']\n", command: "jdtls", args: []string{"-data", "custom workspace"}},
+		{name: "custom command", body: "[lsp.java]\ncommand = 'custom-java'\n", command: "custom-java"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := writeTestConfig(t, test.body)
+			cfg, err := Load(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			check := func(cfg *Config) {
+				t.Helper()
+				got := cfg.LSP["java"]
+				if got.Command != test.command || !slices.Equal(got.Args, test.args) {
+					t.Fatalf("Java configuration = %+v, want command %q args %q", got, test.command, test.args)
+				}
+			}
+			check(cfg)
+			if err := Save(root, cfg); err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := Load(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			check(loaded)
+		})
 	}
 }
 

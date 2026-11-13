@@ -37,6 +37,8 @@ func TestManagerUsesSharedServerSelection(t *testing.T) {
 		override                bool
 	}{
 		{name: "configured Go", language: "go", version: "7.0.2"},
+		{name: "automatic Java", language: "java"},
+		{name: "explicit Java", language: "java", override: true},
 		{name: "native TypeScript", language: "typescript", version: "7.0.2"},
 		{name: "native TSX", language: "typescriptreact", version: "7.0.2"},
 		{name: "wrapper", language: "typescript", version: "5.6.3"},
@@ -44,7 +46,10 @@ func TestManagerUsesSharedServerSelection(t *testing.T) {
 		{name: "explicit TSX", language: "typescriptreact", version: "7.0.2", override: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root := writeTypeScriptFixture(t, test.version, true)
+			root := t.TempDir()
+			if test.version != "" {
+				root = writeTypeScriptFixture(t, test.version, true)
+			}
 			cfg := config.DefaultConfig()
 			if test.override {
 				cfg.LSP[test.language] = config.LSPConfig{Command: "custom-server", Args: []string{"--stdio", "--workspace", "custom path"}}
