@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,6 +23,7 @@ var initCmd = &cobra.Command{
 3. Creating .cgignore seeded from .gitignore
 4. Adding .codegraph/ to .gitignore
 
+Existing config.toml and .cgignore files are preserved.
 After initialization, edit .codegraph/.cgignore to customize what gets indexed,
 then run 'codegraph build' to index your project.`,
 	RunE: runInit,
@@ -49,16 +51,24 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 	// 2. Create config.toml
 	cfg := config.DefaultConfig()
-	if err := config.Save(cwd, cfg); err != nil {
+	switch err := config.SaveIfAbsent(cwd, cfg); {
+	case errors.Is(err, os.ErrExist):
+		fmt.Printf("📁 Preserved %s\n", Path(".codegraph/config.toml"))
+	case err != nil:
 		return fmt.Errorf("failed to create config: %w", err)
+	default:
+		fmt.Printf("📁 Created %s\n", Path(".codegraph/config.toml"))
 	}
-	fmt.Printf("📁 Created %s\n", Path(".codegraph/config.toml"))
 
 	// 3. Create .cgignore
-	if err := ignore.CreateDefaultCGIgnore(codegraphDir, cwd); err != nil {
+	switch err := ignore.CreateDefaultCGIgnore(codegraphDir, cwd); {
+	case errors.Is(err, os.ErrExist):
+		fmt.Printf("📁 Preserved %s\n", Path(".codegraph/.cgignore"))
+	case err != nil:
 		return fmt.Errorf("failed to create .cgignore: %w", err)
+	default:
+		fmt.Printf("📁 Created %s (seeded from %s when available)\n", Path(".codegraph/.cgignore"), Dim("\".gitignore\""))
 	}
-	fmt.Printf("📁 Created %s (seeded from %s when available)\n", Path(".codegraph/.cgignore"), Dim("\".gitignore\""))
 
 	// 4. Update .gitignore
 	if err := updateGitignore(cwd); err != nil {
