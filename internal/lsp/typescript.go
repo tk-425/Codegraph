@@ -27,14 +27,22 @@ type ResolvedServer struct {
 }
 
 // ResolveServer selects a configured language's server without starting it.
-// Only the automatic TypeScript wrapper configuration may select a local native
-// server; all other commands and arguments remain authoritative.
+// Automatic Java configuration receives a project-local workspace; the automatic
+// TypeScript wrapper may select a local native server. Overrides stay authoritative.
 func ResolveServer(cfg *config.Config, projectRoot, language string) (ResolvedServer, error) {
 	configured, ok := cfg.LSP[language]
 	if !ok {
 		return ResolvedServer{}, fmt.Errorf("no LSP configuration for language: %s", language)
 	}
 	server := ResolvedServer{Command: configured.Command, Args: append([]string(nil), configured.Args...)}
+	if language == "java" && configured.Command == "jdtls" && len(configured.Args) == 0 {
+		root, err := filepath.Abs(projectRoot)
+		if err != nil {
+			return ResolvedServer{}, fmt.Errorf("resolve Java workspace root: %w", err)
+		}
+		server.Args = []string{"-data", filepath.Join(root, config.DefaultConfigDir, "jdtls-workspace")}
+		return server, nil
+	}
 	if (language != "typescript" && language != "typescriptreact") || !isAutomaticTypeScriptConfig(configured) {
 		return server, nil
 	}

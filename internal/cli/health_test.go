@@ -66,7 +66,7 @@ func lspHealth() ([]healthRecord, []string) {
 		args := `["--stdio"]`
 		switch lang {
 		case "java":
-			args = `["-data" "/tmp/jdtls-workspace"]`
+			args = `["-data" "$DIR/.codegraph/jdtls-workspace"]`
 		case "swift", "rust", "ocaml":
 			args = `[]`
 		}
