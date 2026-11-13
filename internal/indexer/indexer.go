@@ -581,13 +581,16 @@ func fingerprint(content []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// Increment when extraction semantics change without changing the index format.
+const extractorRevision = 1
+
 // providerDigest fingerprints what extraction under language depends on:
 // the index format's identity version, the resolved server command and
 // arguments (recorded even when its startup failed), and — when a server
 // is live — the capabilities that shape extraction (R02).
 func providerDigest(language string, mgr *lsp.Manager, client *lsp.Client) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "format=%d", db.FormatVersion)
+	fmt.Fprintf(h, "format=%d;extractor=%d", db.FormatVersion, extractorRevision)
 	if command, args, ok := mgr.Server(language); ok {
 		fmt.Fprintf(h, ";command=%s;args=%v", command, args)
 	} else {

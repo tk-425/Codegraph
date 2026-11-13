@@ -211,20 +211,13 @@ func (t *TreeSitterIndexer) extractGoSymbol(node *sitter.Node, content []byte) (
 		if nameNode := node.ChildByFieldName("name"); nameNode != nil {
 			name = nameNode.Content(content)
 			kind = "function"
-			signature = node.Content(content)
-			// Truncate signature to first line
-			if idx := findNewline(signature); idx > 0 {
-				signature = signature[:idx]
-			}
+			signature = declarationSignature(node, content)
 		}
 	case "method_declaration":
 		if nameNode := node.ChildByFieldName("name"); nameNode != nil {
 			name = nameNode.Content(content)
 			kind = "method"
-			signature = node.Content(content)
-			if idx := findNewline(signature); idx > 0 {
-				signature = signature[:idx]
-			}
+			signature = declarationSignature(node, content)
 		}
 	case "type_declaration":
 		for i := 0; i < int(node.NamedChildCount()); i++ {
@@ -267,7 +260,7 @@ func (t *TreeSitterIndexer) extractPythonSymbol(node *sitter.Node, content []byt
 		if nameNode := node.ChildByFieldName("name"); nameNode != nil {
 			name = nameNode.Content(content)
 			kind = "function"
-			signature = getFirstLine(node.Content(content))
+			signature = declarationSignature(node, content)
 		}
 	case "class_definition":
 		if nameNode := node.ChildByFieldName("name"); nameNode != nil {
@@ -285,7 +278,7 @@ func (t *TreeSitterIndexer) extractSwiftSymbol(node *sitter.Node, content []byte
 		if nameNode := node.ChildByFieldName("name"); nameNode != nil {
 			name = nameNode.Content(content)
 			kind = "function"
-			signature = getFirstLine(node.Content(content))
+			signature = declarationSignature(node, content)
 		}
 	case "class_declaration":
 		if nameNode := node.ChildByFieldName("name"); nameNode != nil {
@@ -317,7 +310,7 @@ func (t *TreeSitterIndexer) extractTypeScriptSymbol(node *sitter.Node, content [
 		if nameNode := node.ChildByFieldName("name"); nameNode != nil {
 			name = nameNode.Content(content)
 			kind = "function"
-			signature = getFirstLine(node.Content(content))
+			signature = declarationSignature(node, content)
 		}
 	case "class_declaration":
 		if nameNode := node.ChildByFieldName("name"); nameNode != nil {
@@ -333,7 +326,7 @@ func (t *TreeSitterIndexer) extractTypeScriptSymbol(node *sitter.Node, content [
 		if nameNode := node.ChildByFieldName("name"); nameNode != nil {
 			name = nameNode.Content(content)
 			kind = "method"
-			signature = getFirstLine(node.Content(content))
+			signature = declarationSignature(node, content)
 		}
 	}
 	return
@@ -345,7 +338,7 @@ func (t *TreeSitterIndexer) extractJavaSymbol(node *sitter.Node, content []byte)
 		if nameNode := node.ChildByFieldName("name"); nameNode != nil {
 			name = nameNode.Content(content)
 			kind = "method"
-			signature = getFirstLine(node.Content(content))
+			signature = declarationSignature(node, content)
 		}
 	case "class_declaration":
 		if nameNode := node.ChildByFieldName("name"); nameNode != nil {
@@ -372,7 +365,7 @@ func (t *TreeSitterIndexer) extractRustSymbol(node *sitter.Node, content []byte)
 		if nameNode := node.ChildByFieldName("name"); nameNode != nil {
 			name = nameNode.Content(content)
 			kind = "function"
-			signature = getFirstLine(node.Content(content))
+			signature = declarationSignature(node, content)
 		}
 	case "struct_item":
 		if nameNode := node.ChildByFieldName("name"); nameNode != nil {
@@ -407,29 +400,22 @@ func (t *TreeSitterIndexer) extractOCamlSymbol(node *sitter.Node, content []byte
 			} else {
 				kind = "variable"
 			}
-			// Extract type signature from val declarations
-			signature = extractOCamlSignature(node, content)
+			signature = declarationSignature(node, content)
 		}
 	case "let_binding":
 		if patternNode := node.ChildByFieldName("pattern"); patternNode != nil {
 			name = patternNode.Content(content)
 			kind = "function"
-			signature = extractOCamlSignature(node, content)
+			signature = declarationSignature(node, content)
 		}
 	case "value_specification":
-		// val declarations in .mli files: val add : float -> float -> float
-		if nameNode := node.ChildByFieldName("name"); nameNode != nil {
-			name = nameNode.Content(content)
-			kind = "function"
-			// Get the type signature
-			if typeNode := node.ChildByFieldName("type"); typeNode != nil {
-				fullType := typeNode.Content(content)
-				// Extract return type (last part after ->)
-				if idx := strings.LastIndex(fullType, "->"); idx != -1 {
-					signature = strings.TrimSpace(fullType[idx+2:])
-				} else {
-					signature = fullType
-				}
+		// The installed grammar uses an unfielded value_name child, not name/type fields.
+		for i := 0; i < int(node.NamedChildCount()); i++ {
+			if child := node.NamedChild(i); child.Type() == "value_name" {
+				name = child.Content(content)
+				kind = "function"
+				signature = declarationSignature(node, content)
+				break
 			}
 		}
 	case "type_definition":
@@ -451,21 +437,23 @@ func (t *TreeSitterIndexer) extractOCamlSymbol(node *sitter.Node, content []byte
 	return
 }
 
-// extractOCamlSignature extracts return type from OCaml function definitions
-func extractOCamlSignature(node *sitter.Node, content []byte) string {
-	// Look for type annotation in the node
-	for i := 0; i < int(node.NamedChildCount()); i++ {
-		child := node.NamedChild(i)
-		if child.Type() == "type_annotation" || child.Type() == "typed_pattern" {
-			typeContent := child.Content(content)
-			// Extract return type (last part after ->)
-			if idx := strings.LastIndex(typeContent, "->"); idx != -1 {
-				return strings.TrimSpace(typeContent[idx+2:])
-			}
-			return typeContent
-		}
+// declarationSignature retains the complete source header, not a first line or return type.
+func declarationSignature(node *sitter.Node, content []byte) string {
+	if node.HasError() {
+		return ""
 	}
-	return ""
+	end := node.EndByte()
+	body := node.ChildByFieldName("body")
+	if body != nil {
+		end = body.StartByte()
+	} else if node.Type() == "let_binding" {
+		return "" // A binding without a known body boundary is not a reliable header.
+	}
+	header := strings.TrimSpace(string(content[node.StartByte():end]))
+	if node.Type() == "let_binding" {
+		header = strings.TrimSpace(strings.TrimSuffix(header, "="))
+	}
+	return header
 }
 
 // Helper functions
@@ -499,7 +487,7 @@ func (t *TreeSitterIndexer) extractCSymbol(node *sitter.Node, content []byte) (n
 				name = name[:idx]
 			}
 			kind = "function"
-			signature = getFirstLine(node.Content(content))
+			signature = declarationSignature(node, content)
 		}
 	case "struct_specifier":
 		if nameNode := node.ChildByFieldName("name"); nameNode != nil {
@@ -524,7 +512,7 @@ func (t *TreeSitterIndexer) extractCppSymbol(node *sitter.Node, content []byte) 
 				name = name[:idx]
 			}
 			kind = "function"
-			signature = getFirstLine(node.Content(content))
+			signature = declarationSignature(node, content)
 		}
 	case "class_specifier":
 		if nameNode := node.ChildByFieldName("name"); nameNode != nil {
@@ -556,19 +544,7 @@ func (t *TreeSitterIndexer) extractCSharpSymbol(node *sitter.Node, content []byt
 		if nameNode := node.ChildByFieldName("name"); nameNode != nil {
 			name = nameNode.Content(content)
 			kind = "method"
-			// Extract just the return type, not the full declaration
-			if returnType := node.ChildByFieldName("type"); returnType != nil {
-				signature = returnType.Content(content)
-			} else {
-				// Fallback: look for predefined_type or type child
-				for i := 0; i < int(node.NamedChildCount()); i++ {
-					child := node.NamedChild(i)
-					if child.Type() == "predefined_type" || child.Type() == "type" || child.Type() == "void_keyword" {
-						signature = child.Content(content)
-						break
-					}
-				}
-			}
+			signature = declarationSignature(node, content)
 		}
 	case "struct_declaration":
 		if nameNode := node.ChildByFieldName("name"); nameNode != nil {
