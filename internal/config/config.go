@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -147,6 +148,16 @@ func Load(projectRoot string) (*Config, error) {
 
 // Save saves the configuration to the config file
 func Save(projectRoot string, cfg *Config) error {
+	return save(projectRoot, cfg, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+}
+
+// SaveIfAbsent saves config only when its path does not exist. Existing paths
+// are preserved and reported with an error matching os.ErrExist.
+func SaveIfAbsent(projectRoot string, cfg *Config) error {
+	return save(projectRoot, cfg, os.O_WRONLY|os.O_CREATE|os.O_EXCL)
+}
+
+func save(projectRoot string, cfg *Config, flags int) error {
 	configDir := filepath.Join(projectRoot, DefaultConfigDir)
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
@@ -162,7 +173,12 @@ func Save(projectRoot string, cfg *Config) error {
 	header := []byte("# CodeGraph Configuration\n# Languages are auto-detected based on file extensions in the project.\n# Only configure LSP commands if you need to override defaults.\n\n")
 	data = append(header, data...)
 
-	if err := os.WriteFile(configPath, data, 0644); err != nil {
+	f, err := os.OpenFile(configPath, flags, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to write config: %w", err)
+	}
+	_, writeErr := f.Write(data)
+	if err := errors.Join(writeErr, f.Close()); err != nil {
 		return fmt.Errorf("failed to write config: %w", err)
 	}
 

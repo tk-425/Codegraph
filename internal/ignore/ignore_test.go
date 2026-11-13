@@ -2,6 +2,7 @@ package ignore_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,6 +39,94 @@ func TestCreateDefaultCGIgnoreSeedsGitignore(t *testing.T) {
 	}
 	if want := gitignoreContent; !strings.Contains(content, want) {
 		t.Fatalf(".cgignore missing gitignore content %q\n%s", want, content)
+	}
+}
+
+func TestCreateDefaultCGIgnorePreservesExistingPaths(t *testing.T) {
+	for _, kind := range []string{"file", "directory", "symlink", "dangling_symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			root := t.TempDir()
+			dir := filepath.Join(root, ".codegraph")
+			if err := os.Mkdir(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			// A seed that cannot be read must not prevent preserving an existing path.
+			if err := os.Mkdir(filepath.Join(root, ".gitignore"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, ".cgignore")
+			target := filepath.Join(root, "custom.ignore")
+			switch kind {
+			case "file":
+				if err := os.WriteFile(path, []byte("# custom\nprivate/\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "directory":
+				if err := os.Mkdir(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				if kind == "symlink" {
+					if err := os.WriteFile(target, []byte("# custom\nprivate/\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := ignore.CreateDefaultCGIgnore(dir, root); !errors.Is(err, os.ErrExist) {
+				t.Fatalf("existing %s: got %v, want ErrExist", kind, err)
+			}
+			info, err := os.Lstat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch kind {
+			case "file", "symlink":
+				data, err := os.ReadFile(path)
+				if err != nil || string(data) != "# custom\nprivate/\n" {
+					t.Fatalf("content changed: data=%q err=%v", data, err)
+				}
+			case "directory":
+				if !info.IsDir() {
+					t.Fatal("directory replaced")
+				}
+			case "dangling_symlink":
+				if _, err := os.Lstat(target); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("dangling target created: %v", err)
+				}
+			}
+			if strings.Contains(kind, "symlink") {
+				link, err := os.Readlink(path)
+				if err != nil || link != target {
+					t.Fatalf("symlink changed: link=%q err=%v", link, err)
+				}
+			}
+		})
+	}
+}
+
+func TestCreateDefaultCGIgnoreReportsCreationFailures(t *testing.T) {
+	for _, kind := range []string{"missing_parent", "unreadable_seed"} {
+		t.Run(kind, func(t *testing.T) {
+			root := t.TempDir()
+			dir := filepath.Join(root, ".codegraph")
+			if kind == "unreadable_seed" {
+				if err := os.Mkdir(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(filepath.Join(root, ".gitignore"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := ignore.CreateDefaultCGIgnore(dir, root); err == nil || errors.Is(err, os.ErrExist) {
+				t.Fatalf("creation failure must not report preserved: %v", err)
+			}
+			if _, err := os.Lstat(filepath.Join(dir, ".cgignore")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("failed creation left an ignore file: %v", err)
+			}
+		})
 	}
 }
 
