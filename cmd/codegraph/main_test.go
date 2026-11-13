@@ -159,6 +159,96 @@ func TestHealthCLITracer(t *testing.T) {
 	}
 }
 
+func TestHealthJavaSelectionProcess(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	marker := filepath.Join(root, "server-started")
+	if err := os.WriteFile(filepath.Join(bin, "jdtls"), []byte(fmt.Sprintf("#!/bin/sh\nprintf started > %q\n", marker)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	args := []string{"-data", filepath.Join(root, "custom java workspace")}
+	cfg.LSP["java"] = config.LSPConfig{Command: "jdtls", Args: args}
+	if err := config.Save(root, cfg); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := db.NewManager(cfg.GetDatabasePath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Initialize(); err != nil {
+		_ = manager.Close()
+		t.Fatal(err)
+	}
+	if err := manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(root, ".codegraph", "config.toml")
+	read := func(path string) []byte {
+		t.Helper()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	configBefore, dbBefore := read(configPath), read(cfg.GetDatabasePath(root))
+	detail := fmt.Sprintf("command=%q; args=%q; executable available; initialization unchecked; capabilities unchecked", "jdtls", args)
+	for _, jsonMode := range []bool{true, false} {
+		cliArgs := []string{"health"}
+		if jsonMode {
+			cliArgs = append(cliArgs, "--json")
+		}
+		result := runCLI(t, root, cliArgs...)
+		if result.exit != 0 || len(result.stderr) != 0 {
+			t.Fatalf("health %v: exit=%d stdout=%s stderr=%s", cliArgs, result.exit, result.stdout, result.stderr)
+		}
+		if jsonMode {
+			output := requireOneEnvelope(t, result)
+			if output.Command != "health" || len(output.Errors) != 0 {
+				t.Fatalf("unexpected health envelope: %s", result.stdout)
+			}
+			found := false
+			for _, raw := range output.Results {
+				var record struct {
+					Category, Name, Detail string
+					OK                     bool
+				}
+				if err := json.Unmarshal(raw, &record); err != nil {
+					t.Fatal(err)
+				}
+				if record.Category == "lsp" && record.Name == "java" {
+					if found || !record.OK || record.Detail != detail {
+						t.Fatalf("unexpected Java server: %+v, want %s", record, detail)
+					}
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("missing Java diagnostic: %s", result.stdout)
+			}
+		} else if !bytes.Contains(result.stdout, []byte("java: "+detail)) {
+			t.Fatalf("human output missing effective Java server: %s", result.stdout)
+		}
+		for _, path := range []string{marker, args[1], filepath.Join(root, ".codegraph", "jdtls-workspace")} {
+			if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("health created %s: stat=%v", path, err)
+			}
+		}
+		if !bytes.Equal(configBefore, read(configPath)) || !bytes.Equal(dbBefore, read(cfg.GetDatabasePath(root))) {
+			t.Fatal("health changed config or database bytes")
+		}
+	}
+}
+
 func TestHealthEffectiveServersProcess(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	for _, test := range []struct {
