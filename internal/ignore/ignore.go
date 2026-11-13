@@ -141,8 +141,16 @@ func (m *Matcher) GetPatterns() []string {
 }
 
 // CreateDefaultCGIgnore creates a .cgignore file seeded from the project's .gitignore.
+// Existing paths are preserved and reported with an error matching os.ErrExist.
 func CreateDefaultCGIgnore(codegraphDir, projectRoot string) error {
 	path := filepath.Join(codegraphDir, ".cgignore")
+	// Preserve existing paths without trying to read a new seed. The exclusive
+	// open below also protects a path created while the seed is being prepared.
+	if _, err := os.Lstat(path); err == nil {
+		return &os.PathError{Op: "create", Path: path, Err: os.ErrExist}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 
 	var b strings.Builder
 	b.WriteString("# CodeGraph Ignore File\n")
@@ -170,7 +178,12 @@ func CreateDefaultCGIgnore(codegraphDir, projectRoot string) error {
 	b.WriteString("# *_test.go\n")
 	b.WriteString("# *.generated.go\n")
 
-	return os.WriteFile(path, []byte(b.String()), 0644)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+	if err != nil {
+		return err
+	}
+	_, writeErr := f.WriteString(b.String())
+	return errors.Join(writeErr, f.Close())
 }
 
 func extractPatterns(content []byte) []string {
