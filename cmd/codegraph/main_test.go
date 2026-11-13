@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -108,6 +109,211 @@ func requireOneEnvelope(t *testing.T, result cliResult) envelope {
 		t.Errorf("count=%d does not equal result records=%d", decoded.Count, len(decoded.Results))
 	}
 	return decoded
+}
+
+// TestHealthCLITracer reaches the real command through a compatible database,
+// with a missing executable reported as a diagnostic rather than a CLI failure.
+func TestHealthCLITracer(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.DefaultConfig()
+	missing := filepath.Join(root, "missing-gopls")
+	cfg.LSP["go"] = config.LSPConfig{Command: missing, Args: []string{"serve"}}
+	if err := config.Save(root, cfg); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := db.NewManager(cfg.GetDatabasePath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Initialize(); err != nil {
+		_ = manager.Close()
+		t.Fatal(err)
+	}
+	if err := manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	result := runCLI(t, root, "health", "--json")
+	output := requireOneEnvelope(t, result)
+	if result.exit != 0 || len(result.stderr) != 0 || output.Command != "health" || len(output.Errors) != 0 {
+		t.Fatalf("health: exit=%d stdout=%s stderr=%s", result.exit, result.stdout, result.stderr)
+	}
+	found := false
+	for _, raw := range output.Results {
+		var record struct {
+			Category, Name, Detail string
+			OK                     bool
+		}
+		if err := json.Unmarshal(raw, &record); err != nil {
+			t.Fatal(err)
+		}
+		if record.Category == "lsp" && record.Name == "go" {
+			if found || record.OK || !strings.Contains(record.Detail, missing) {
+				t.Fatalf("missing executable diagnostic: %+v", record)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no Go executable diagnostic: %s", result.stdout)
+	}
+}
+
+func TestHealthEffectiveServersProcess(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	for _, test := range []struct {
+		name, version               string
+		wrapper, native, available  bool
+		nativeMode                  os.FileMode
+		override, argsOnly, missing bool
+	}{
+		{name: "native without wrapper", version: "7.0.2", nativeMode: 0o755, native: true, available: true},
+		{name: "older wrapper", version: "5.6.3", nativeMode: 0o755, wrapper: true, available: true},
+		{name: "no local package", wrapper: true, available: true},
+		{name: "no local binary", version: "7.0.2", wrapper: true, available: true},
+		{name: "invalid local version", version: "unknown", nativeMode: 0o755, wrapper: true, available: true},
+		{name: "explicit command", version: "7.0.2", nativeMode: 0o755, override: true, available: true},
+		{name: "explicit arguments", version: "7.0.2", nativeMode: 0o755, wrapper: true, argsOnly: true, available: true},
+		{name: "missing override", version: "7.0.2", nativeMode: 0o755, override: true, missing: true},
+		{name: "nonexecutable native", version: "7.0.2", nativeMode: 0o644, native: true},
+		{name: "missing wrapper"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			bin := filepath.Join(root, "bin")
+			if err := os.MkdirAll(bin, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin)
+			marker := filepath.Join(root, "server-started")
+			writeServer := func(path string, mode os.FileMode) {
+				t.Helper()
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(fmt.Sprintf("#!/bin/sh\nprintf started > %q\n", marker)), mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.wrapper {
+				writeServer(filepath.Join(bin, "typescript-language-server"), 0o755)
+			}
+			if test.version != "" {
+				pkg := filepath.Join(root, "node_modules", "typescript")
+				if err := os.MkdirAll(pkg, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(pkg, "package.json"), []byte(fmt.Sprintf(`{"version":%q}`, test.version)), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			native := filepath.Join(root, "node_modules", ".bin", "tsc")
+			if test.nativeMode != 0 {
+				writeServer(native, test.nativeMode)
+			}
+			cfg := config.DefaultConfig()
+			command, args := "typescript-language-server", []string{"--stdio"}
+			if test.native {
+				command, args = native, []string{"--lsp", "--stdio"}
+			}
+			if test.override || test.argsOnly {
+				command, args = "typescript-language-server", []string{"--stdio", "--workspace", "custom path"}
+				if test.override {
+					command = filepath.Join(root, "custom-server")
+					if !test.missing {
+						writeServer(command, 0o755)
+					}
+				}
+				for _, language := range []string{"typescript", "typescriptreact"} {
+					cfg.LSP[language] = config.LSPConfig{Command: command, Args: args}
+				}
+			}
+			if err := config.Save(root, cfg); err != nil {
+				t.Fatal(err)
+			}
+			manager, err := db.NewManager(cfg.GetDatabasePath(root))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := manager.Initialize(); err != nil {
+				_ = manager.Close()
+				t.Fatal(err)
+			}
+			if err := manager.Close(); err != nil {
+				t.Fatal(err)
+			}
+			configPath := filepath.Join(root, ".codegraph", "config.toml")
+			read := func(path string) []byte {
+				t.Helper()
+				data, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return data
+			}
+			configBefore, dbBefore := read(configPath), read(cfg.GetDatabasePath(root))
+			prefix := fmt.Sprintf("command=%q; args=%q; executable ", command, args)
+			if test.available {
+				prefix += "available;"
+			} else {
+				prefix += "unavailable:"
+			}
+			for _, jsonMode := range []bool{true, false} {
+				cliArgs := []string{"health"}
+				if jsonMode {
+					cliArgs = append(cliArgs, "--json")
+				}
+				result := runCLI(t, root, cliArgs...)
+				if result.exit != 0 || len(result.stderr) != 0 {
+					t.Fatalf("health %v: exit=%d stdout=%s stderr=%s", cliArgs, result.exit, result.stdout, result.stderr)
+				}
+				if jsonMode {
+					output := requireOneEnvelope(t, result)
+					if len(output.Errors) != 0 {
+						t.Fatalf("diagnostic became query error: %s", result.stdout)
+					}
+					found := map[string]bool{}
+					for _, raw := range output.Results {
+						var record struct {
+							Category, Name, Detail string
+							OK                     bool
+						}
+						if err := json.Unmarshal(raw, &record); err != nil {
+							t.Fatal(err)
+						}
+						if record.Category != "lsp" || (record.Name != "typescript" && record.Name != "typescriptreact") {
+							continue
+						}
+						if found[record.Name] || record.OK != test.available || !strings.HasPrefix(record.Detail, prefix) || !strings.HasSuffix(record.Detail, "; initialization unchecked; capabilities unchecked") {
+							t.Fatalf("unexpected effective server: %+v, want prefix %s available=%v", record, prefix, test.available)
+						}
+						found[record.Name] = true
+					}
+					if len(found) != 2 {
+						t.Fatalf("missing TS/TSX diagnostics: %s", result.stdout)
+					}
+				} else {
+					for _, language := range []string{"typescript", "typescriptreact"} {
+						if !bytes.Contains(result.stdout, []byte(language+": "+prefix)) {
+							t.Fatalf("human output missing effective %s: %s", language, result.stdout)
+						}
+					}
+					if !bytes.Contains(result.stdout, []byte("; initialization unchecked; capabilities unchecked")) {
+						t.Fatalf("human output claims unchecked work: %s", result.stdout)
+					}
+				}
+				if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("health started a server: marker stat=%v", err)
+				}
+				if !bytes.Equal(configBefore, read(configPath)) || !bytes.Equal(dbBefore, read(cfg.GetDatabasePath(root))) {
+					t.Fatal("health changed project config or database")
+				}
+			}
+		})
+	}
 }
 
 func requireErrorCode(t *testing.T, result cliResult, code string) envelope {
