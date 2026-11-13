@@ -1,6 +1,8 @@
 package lsp
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -29,6 +31,66 @@ func writeTypeScriptFixture(t *testing.T, version string, withExecutable bool) s
 		}
 	}
 	return root
+}
+
+func TestResolveJavaServerIsolatesProjectWorkspaces(t *testing.T) {
+	parent := t.TempDir()
+	cfg := config.DefaultConfig()
+	workspaces := make(map[string]bool)
+	for _, project := range []string{"first", "second"} {
+		// Equal basenames must not collapse distinct projects; URI-sensitive
+		// characters must survive the manager's root conversion.
+		root := filepath.Join(parent, project, "java project #😀")
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, input := range []string{root, root + "/.", projectRootFromURI(PathToURI(root))} {
+			server, err := ResolveServer(cfg, input, "java")
+			want := filepath.Join(root, config.DefaultConfigDir, "jdtls-workspace")
+			if err != nil || server.Command != "jdtls" || server.Native || !slices.Equal(server.Args, []string{"-data", want}) || !filepath.IsAbs(server.Args[1]) {
+				t.Fatalf("resolve %q = %+v, err=%v, want jdtls -data %q", input, server, err, want)
+			}
+			workspaces[server.Args[1]] = true
+			if _, err := os.Stat(filepath.Join(root, config.DefaultConfigDir)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("resolution created project state: %v", err)
+			}
+		}
+	}
+	if len(workspaces) != 2 || len(cfg.LSP["java"].Args) != 0 {
+		t.Fatalf("workspace isolation/config preservation: paths=%v config=%+v", workspaces, cfg.LSP["java"])
+	}
+	// Relative roots still produce absolute server arguments.
+	t.Chdir(parent)
+	server, err := ResolveServer(cfg, filepath.Join("first", "java project #😀"), "java")
+	if err != nil || !slices.Equal(server.Args, []string{"-data", filepath.Join(parent, "first", "java project #😀", config.DefaultConfigDir, "jdtls-workspace")}) {
+		t.Fatalf("relative project root: server=%+v err=%v", server, err)
+	}
+}
+
+func TestResolveJavaServerPreservesExplicitConfiguration(t *testing.T) {
+	for _, configured := range []config.LSPConfig{
+		{Command: "jdtls", Args: []string{"-data", "/tmp/jdtls-workspace"}},
+		{Command: "jdtls", Args: []string{"-data", "custom workspace"}},
+		{Command: "jdtls", Args: []string{"--custom-flag"}},
+		{Command: "custom-java"},
+		{Command: "custom-java", Args: []string{"-data", "custom workspace"}},
+	} {
+		t.Run(configured.Command+fmt.Sprint(configured.Args), func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.LSP["java"] = configured
+			before := slices.Clone(configured.Args)
+			server, err := ResolveServer(cfg, t.TempDir(), "java")
+			if err != nil || server.Native || server.Command != configured.Command || !slices.Equal(server.Args, configured.Args) {
+				t.Fatalf("override changed: server=%+v err=%v, want %+v", server, err, configured)
+			}
+			if len(server.Args) > 0 {
+				server.Args[0] = "changed result"
+				if !slices.Equal(cfg.LSP["java"].Args, before) {
+					t.Fatal("resolution aliased configured args")
+				}
+			}
+		})
+	}
 }
 
 func TestResolveTypeScriptServerUsesNativeServerForTypeScript7(t *testing.T) {
