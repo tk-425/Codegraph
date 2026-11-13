@@ -92,6 +92,43 @@ func TestBuildStoresReceiverMethodsAsDistinctSymbols(t *testing.T) {
 	}
 }
 
+// S4b.3 tracer: the real build/query path preserves known signature information
+// from the snapshot, even if the source on disk changes after publication.
+func TestSignatureCLITracer(t *testing.T) {
+	root := newSyntaxProject(t, map[string]string{
+		"source.go": "package fixture\n\nfunc SignatureTracer(input string) bool { return input != \"\" }\n",
+	})
+	requireBuild(t, root)
+	dbPath := filepath.Join(root, ".codegraph", "graphs", "codegraph.db")
+	before := fileDigest(t, dbPath)
+	if err := os.WriteFile(filepath.Join(root, "source.go"), []byte("package fixture\n\nfunc ChangedOnDisk() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result := runCLI(t, root, "signature", "SignatureTracer", "--lang=go", "--json")
+	if result.exit != 0 {
+		t.Fatalf("signature exit=%d stdout=%s stderr=%s", result.exit, result.stdout, result.stderr)
+	}
+	env := requireOneEnvelope(t, result)
+	if env.Count != 1 {
+		t.Fatalf("count=%d, want one stored symbol: %s", env.Count, result.stdout)
+	}
+	var record struct {
+		ID, Name, Source, Origin, Kind, Language, Signature string
+	}
+	if err := json.Unmarshal(env.Results[0], &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.ID == "" || record.Name != "SignatureTracer" || record.Source != "tree-sitter" || record.Origin != "stored" || record.Kind != "function" || record.Language != "go" {
+		t.Fatalf("stored result lost identity, filters or provenance: %+v", record)
+	}
+	if !strings.Contains(record.Signature, "func SignatureTracer(input string) bool") || strings.Contains(record.Signature, "ChangedOnDisk") {
+		t.Fatalf("known stored signature not preserved: %+v", record)
+	}
+	if fileDigest(t, dbPath) != before {
+		t.Fatal("signature modified the published database")
+	}
+}
+
 // S4b.1 tracer: the real CLI preserves stored identity and provenance without
 // changing the published database while answering a filtered search.
 func TestSearchCLITracer(t *testing.T) {

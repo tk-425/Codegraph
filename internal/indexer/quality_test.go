@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"github.com/tk-425/Codegraph/internal/config"
 	"github.com/tk-425/Codegraph/internal/lsp"
 	"io"
@@ -70,6 +71,82 @@ func TestCompleteSemanticPublication(t *testing.T) {
 	}
 	if len(callees) != 1 || callees[0].Evidence != "lsp-validated-reference" {
 		t.Fatalf("semantic evidence=%+v", callees)
+	}
+}
+
+// The scripted peer exercises extraction and publication, not real-server semantics.
+func TestLSPDetailPreservedInPublishedSymbols(t *testing.T) {
+	for _, tc := range []struct {
+		language, filename, declaration string
+		details                         []string
+	}{
+		{
+			language: "rust", filename: "source.rs", declaration: "fn %s() {}\n",
+			details: []string{
+				"fn(value: i32, callback: fn(i32) -> i32) -> i32",
+				"fn(\n    value: i32,\n) -> Result<i32, Error>",
+				"fn()", "i32", "", " \n\t",
+			},
+		},
+		{
+			language: "java", filename: "Source.java", declaration: "void %s() {}\n",
+			details: []string{
+				"public <T> List<T> collect(T input)",
+				"double calculate(\n    double input\n)",
+				"void run()", " : double", "", " \n\t",
+			},
+		},
+	} {
+		t.Run(tc.language, func(t *testing.T) {
+			p := newTransportProject(t, "refresh/before.go", tc.filename)
+			var content strings.Builder
+			var symbols []lsp.DocumentSymbol
+			for n, detail := range tc.details {
+				name := fmt.Sprintf("symbol%d", n)
+				line := fmt.Sprintf(tc.declaration, name)
+				content.WriteString(line)
+				column := strings.Index(line, name)
+				symbols = append(symbols, lsp.DocumentSymbol{
+					Name: name, Detail: detail, Kind: lsp.SymbolKindFunction,
+					Range: lsp.Range{Start: lsp.Position{Line: n}, End: lsp.Position{Line: n, Character: len(line) - 1}},
+					SelectionRange: lsp.Range{Start: lsp.Position{Line: n, Character: column},
+						End: lsp.Position{Line: n, Character: column + len(name)}},
+				})
+			}
+			if err := os.WriteFile(filepath.Join(p.root, tc.filename), []byte(content.String()), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			data, err := json.Marshal(map[string]any{
+				"initialize":                  map[string]any{"capabilities": map[string]bool{"documentSymbolProvider": true}},
+				"textDocument/documentSymbol": symbols,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixture := filepath.Join(t.TempDir(), "details.json")
+			if err := os.WriteFile(fixture, data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			p.cfg.LSP[tc.language] = config.LSPConfig{Command: scriptedPeer(t), Args: []string{"-responses", fixture}}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if _, err := p.index(ctx, t); err != nil {
+				t.Fatal(err)
+			}
+			for n, detail := range tc.details {
+				name := fmt.Sprintf("symbol%d", n)
+				stored, err := p.database.GetSymbolByName(name, []string{tc.language})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(stored) != 1 {
+					t.Fatalf("%s: want one published symbol, got %+v", name, stored)
+				}
+				if stored[0].Signature != detail || stored[0].Documentation != "" || stored[0].Source != "lsp" {
+					t.Errorf("%s: provider detail %q not retained without fabricated docs: %+v", name, detail, stored[0])
+				}
+			}
+		})
 	}
 }
 
