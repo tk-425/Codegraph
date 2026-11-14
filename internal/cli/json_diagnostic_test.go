@@ -86,14 +86,15 @@ func TestJSONDiagnostic_Projects(t *testing.T) {
 	}
 	regPath := filepath.Join(regDir, "registry.json")
 
-	reg := registry.New()
-	reg.Projects["/nonexistent/path"] = &registry.Project{
-		Name:          "ghostproj",
-		Path:          "/nonexistent/path",
-		InitializedAt: time.Unix(1, 0).UTC(),
-		LastSeen:      time.Unix(2, 0).UTC(),
-	}
-	if err := reg.Save(regPath); err != nil {
+	if err := registry.Update(t.Context(), regPath, func(reg *registry.Registry) error {
+		reg.Projects["/nonexistent/path"] = &registry.Project{
+			Name:          "ghostproj",
+			Path:          "/nonexistent/path",
+			InitializedAt: time.Unix(1, 0).UTC(),
+			LastSeen:      time.Unix(2, 0).UTC(),
+		}
+		return nil
+	}); err != nil {
 		t.Fatalf("registry save: %v", err)
 	}
 

@@ -63,11 +63,12 @@ func runPrune(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	for _, p := range toRemove {
-		reg.Remove(p)
-	}
-
-	if err := reg.Save(regPath); err != nil {
+	if err := registry.Update(cmd.Context(), regPath, func(latest *registry.Registry) error {
+		for _, p := range toRemove {
+			latest.Remove(p)
+		}
+		return nil
+	}); err != nil {
 		return fmt.Errorf("failed to save registry: %w", err)
 	}
 
