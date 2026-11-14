@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/tk-425/Codegraph/internal/registry"
@@ -23,6 +24,11 @@ func init() {
 	rootCmd.AddCommand(pruneCmd)
 }
 
+type pruneCandidate struct {
+	path     string
+	lastSeen time.Time
+}
+
 func runPrune(cmd *cobra.Command, args []string) error {
 	regPath, err := registry.DefaultRegistryPath()
 	if err != nil {
@@ -34,10 +40,10 @@ func runPrune(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	var toRemove []string
-	for path := range reg.Projects {
+	var toRemove []pruneCandidate
+	for path, proj := range reg.Projects {
 		if _, err := os.Stat(path); os.IsNotExist(err) {
-			toRemove = append(toRemove, path)
+			toRemove = append(toRemove, pruneCandidate{path: path, lastSeen: proj.LastSeen})
 		}
 	}
 
@@ -47,8 +53,8 @@ func runPrune(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("🗑️  Found %s missing projects:\n\n", Warning(len(toRemove)))
-	for _, p := range toRemove {
-		fmt.Printf("  %s %s\n", Error("✗"), Path(p))
+	for _, candidate := range toRemove {
+		fmt.Printf("  %s %s\n", Error("✗"), Path(candidate.path))
 	}
 
 	if !pruneForceFlag {
@@ -63,15 +69,30 @@ func runPrune(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Revalidate each approved candidate under the update lock: entries that a
+	// concurrent registration refreshed, paths that exist again, and entries
+	// another prune already removed all survive.
+	removed := 0
 	if err := registry.Update(cmd.Context(), regPath, func(latest *registry.Registry) error {
-		for _, p := range toRemove {
-			latest.Remove(p)
+		for _, candidate := range toRemove {
+			proj, ok := latest.Projects[candidate.path]
+			if !ok {
+				continue
+			}
+			if !proj.LastSeen.Equal(candidate.lastSeen) {
+				continue
+			}
+			if _, err := os.Stat(candidate.path); !os.IsNotExist(err) {
+				continue
+			}
+			latest.Remove(candidate.path)
+			removed++
 		}
 		return nil
 	}); err != nil {
 		return fmt.Errorf("failed to save registry: %w", err)
 	}
 
-	fmt.Printf("✅ %s\n", Success(fmt.Sprintf("Removed %d projects from registry", len(toRemove))))
+	fmt.Printf("✅ %s\n", Success(fmt.Sprintf("Removed %d projects from registry", removed)))
 	return nil
 }
