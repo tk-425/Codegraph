@@ -2,10 +2,13 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tk-425/Codegraph/internal/config"
 	"github.com/tk-425/Codegraph/internal/registry"
@@ -186,5 +189,101 @@ func TestInitCreatesMissingArtifacts(t *testing.T) {
 	}
 	if _, err := os.Stat(config.DefaultConfig().GetDatabasePath(root)); !os.IsNotExist(err) {
 		t.Fatalf("init must not create a database: stat error=%v", err)
+	}
+}
+
+// cliCommandIn mirrors cliCommand with separate home and working directories,
+// so concurrent projects can share one isolated registry.
+func cliCommandIn(t *testing.T, home, dir string, args ...string) *exec.Cmd {
+	t.Helper()
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	childArgs := append([]string{"-test.run=^TestCLIHelperProcess$", "--"}, args...)
+	command := exec.Command(binary, childArgs...)
+	command.Dir = dir
+	command.Env = append(os.Environ(), "CODEGRAPH_CLI_CHILD=1", "HOME="+home)
+	command.WaitDelay = time.Second
+	return command
+}
+
+// Concurrent init runs must each complete a registration in the shared
+// registry, and the reader command must see every entry afterwards.
+func TestInitConcurrentRegistrationsRetained(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const count = 8
+	commands := make([]*exec.Cmd, 0, count)
+	killStarted := func() {
+		for _, command := range commands {
+			if command.Process != nil && command.ProcessState == nil {
+				_ = command.Process.Kill()
+			}
+		}
+	}
+	paths := make([]string, 0, count)
+	for i := range count {
+		dir := filepath.Join(root, fmt.Sprintf("proj%d", i))
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			killStarted()
+			t.Fatal(err)
+		}
+		paths = append(paths, dir)
+		command := cliCommandIn(t, home, dir, "init")
+		var stdout, stderr bytes.Buffer
+		command.Stdout, command.Stderr = &stdout, &stderr
+		if err := command.Start(); err != nil {
+			killStarted()
+			t.Fatal(err)
+		}
+		commands = append(commands, command)
+	}
+	t.Cleanup(killStarted)
+	for _, command := range commands {
+		done := make(chan error, 1)
+		go func() { done <- command.Wait() }()
+		select {
+		case err := <-done:
+			if err != nil {
+				killStarted()
+				t.Fatalf("concurrent init: %v", err)
+			}
+		case <-time.After(30 * time.Second):
+			killStarted()
+			t.Fatal("init watchdog expired")
+		}
+	}
+
+	regPath := filepath.Join(home, ".codegraph", registry.RegistryFile)
+	reg, err := registry.Load(regPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reg.Projects) != count {
+		t.Fatalf("got %d registrations, want %d", len(reg.Projects), count)
+	}
+	for _, path := range paths {
+		entry, ok := reg.Projects[path]
+		if !ok {
+			t.Fatalf("missing registration for %s", path)
+		}
+		if entry.InitializedAt.IsZero() || entry.LastSeen.IsZero() {
+			t.Fatalf("timestamps unset for %s: %+v", path, entry)
+		}
+	}
+
+	result := runCLI(t, home, "projects", "--json")
+	output := requireOneEnvelope(t, result)
+	if result.exit != 0 || len(result.stderr) != 0 || output.Count != count || len(output.Errors) != 0 {
+		t.Fatalf("projects after concurrent init: exit=%d count=%d errors=%v stderr=%q",
+			result.exit, output.Count, output.Errors, result.stderr)
 	}
 }

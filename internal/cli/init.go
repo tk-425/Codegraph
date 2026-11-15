@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -78,7 +79,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 
 	// 5. Register project
-	if err := registerProject(cwd); err != nil {
+	if err := registerProject(cmd.Context(), cwd); err != nil {
 		fmt.Printf("⚠️  %s: %v\n", Warning("Failed to register project"), err)
 	} else {
 		fmt.Printf("📋 %s\n", Success("Registered project in global registry"))
@@ -106,19 +107,16 @@ func reportAgentNoteResult(result agentNoteResult) {
 	}
 }
 
-func registerProject(cwd string) error {
+func registerProject(ctx context.Context, cwd string) error {
 	regPath, err := registry.DefaultRegistryPath()
 	if err != nil {
 		return err
 	}
 
-	reg, err := registry.Load(regPath)
-	if err != nil {
-		return err
-	}
-
-	reg.Add(cwd, filepath.Base(cwd))
-	return reg.Save(regPath)
+	return registry.Update(ctx, regPath, func(reg *registry.Registry) error {
+		reg.Add(cwd, filepath.Base(cwd))
+		return nil
+	})
 }
 
 // updateGitignore adds .codegraph/ to .gitignore if not already present
