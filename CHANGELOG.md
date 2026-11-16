@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## v0.10.8 (2026-11-15)
+
+Release readiness: the final remediation slice. No runtime behaviour changes.
+
+- CI enforces a whole-repository `gofmt` gate; the last formatting debt is closed.
+- New opt-in real-server integration suite behind `//go:build integration`:
+  `go test -tags integration -count=1 ./cmd/codegraph` runs gopls end-to-end
+  (build, distinct method identities, stored call queries); without gopls it skips
+  with an explicit not-verified reason. CI runs the offline suite only, and skips
+  are never conflated with passes.
+- Tracked documentation now matches tested behaviour: a per-language capability
+  table states what this repository's checks actually verify (real gopls only);
+  `init` is described as setup-only; broken `cc-skills` references and the
+  git-ignored architecture link are gone; this changelog is versioned.
+- A verified clean clone of the release tree builds and passes the full offline
+  suite with no ignored local fixtures.
+
 ## v0.10.7 (2026-11-15)
 
 - Registry updates are serialized by a sibling lock file and published atomically
