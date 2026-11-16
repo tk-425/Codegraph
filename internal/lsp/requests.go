@@ -7,6 +7,9 @@ type InitializeParams struct {
 	ProcessID    int                `json:"processId"`
 	RootURI      string             `json:"rootUri"`
 	Capabilities ClientCapabilities `json:"capabilities"`
+	// InitializationOptions carries server settings at initialize; gopls
+	// documents this channel for settings like buildFlags.
+	InitializationOptions map[string]any `json:"initializationOptions,omitempty"`
 }
 
 // ClientCapabilities describes client capabilities
@@ -47,6 +50,10 @@ type TypeHierarchyClientCapabilities struct {
 // WorkspaceClientCapabilities for workspace features
 type WorkspaceClientCapabilities struct {
 	Symbol WorkspaceSymbolClientCapabilities `json:"symbol,omitempty"`
+	// Configuration reports that this client answers
+	// workspace/configuration requests (LSP 3.17); advertised only when
+	// server settings exist.
+	Configuration bool `json:"configuration,omitempty"`
 }
 
 // WorkspaceSymbolClientCapabilities for workspace symbols

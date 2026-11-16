@@ -23,6 +23,7 @@ type request struct {
 func main() {
 	mode := flag.String("mode", "normal", "normal, exit-on-probe, block-after-initialize, ignore-exit, or <framing>-on-probe")
 	fixture := flag.String("responses", "", "method-to-result JSON fixture")
+	dumpInit := flag.String("dump-init", "", "append each initialize request's params JSON to this file")
 	pidfile := flag.String("pidfile", "", "write this process ID to the file before serving")
 	flag.Parse()
 	if *pidfile != "" {
@@ -31,13 +32,13 @@ func main() {
 			os.Exit(2)
 		}
 	}
-	if err := serve(*mode, *fixture); err != nil {
+	if err := serve(*mode, *fixture, *dumpInit); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
 }
 
-func serve(mode, fixture string) error {
+func serve(mode, fixture, dumpInit string) error {
 	results := map[string]json.RawMessage{}
 	if fixture != "" {
 		data, err := os.ReadFile(fixture)
@@ -102,6 +103,11 @@ func serve(mode, fixture string) error {
 		}
 		result := json.RawMessage("null")
 		if message.Method == "initialize" {
+			if dumpInit != "" {
+				if err := appendFile(dumpInit, message.Params); err != nil {
+					return err
+				}
+			}
 			var params struct {
 				RootURI string `json:"rootUri"`
 			}
@@ -148,6 +154,16 @@ func serve(mode, fixture string) error {
 			hang()
 		}
 	}
+}
+
+func appendFile(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.Write(append(data, '\n'))
+	return err
 }
 
 // Framing violations sent in place of a probe response.

@@ -41,6 +41,12 @@ type Client struct {
 	// capabilities are the server's, recorded at initialization.
 	capabilities ServerCapabilities
 
+	// settingsMu guards serverSettings: the reader goroutine answers
+	// workspace/configuration from it while the manager may set it before
+	// initialization.
+	settingsMu     sync.Mutex
+	serverSettings map[string]any
+
 	closeOnce sync.Once
 	closed    chan struct{}
 	closeErr  error
@@ -249,6 +255,22 @@ func (c *Client) DrainLogMessages() []LSPDiagnostic {
 	return drained
 }
 
+// SetServerSettings sets the server settings delivered in
+// initializationOptions and to workspace/configuration requests. Called
+// before Initialize; a nil map leaves the wire exactly as it was.
+func (c *Client) SetServerSettings(settings map[string]any) {
+	c.settingsMu.Lock()
+	defer c.settingsMu.Unlock()
+	c.serverSettings = settings
+}
+
+// ServerSettings returns the configured server settings.
+func (c *Client) ServerSettings() map[string]any {
+	c.settingsMu.Lock()
+	defer c.settingsMu.Unlock()
+	return c.serverSettings
+}
+
 // Initialize sends the initialize request to the LSP server. The caller's
 // context is its only budget; initialization is not an ordinary request.
 func (c *Client) Initialize(ctx context.Context) (*InitializeResult, error) {
@@ -256,6 +278,10 @@ func (c *Client) Initialize(ctx context.Context) (*InitializeResult, error) {
 		ProcessID:    os.Getpid(),
 		RootURI:      c.RootURI,
 		Capabilities: DefaultClientCapabilities(),
+	}
+	if settings := c.ServerSettings(); len(settings) > 0 {
+		params.InitializationOptions = settings
+		params.Capabilities.Workspace.Configuration = true
 	}
 
 	var result InitializeResult

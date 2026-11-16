@@ -107,6 +107,9 @@ func (m *Manager) GetClient(ctx context.Context, language string) (*Client, erro
 			client.requestTimeout = m.cfg.LSPTimeouts.Request()
 			client.gracefulTimeout = m.cfg.LSPTimeouts.ShutdownGraceful()
 			client.forceTimeout = m.cfg.LSPTimeouts.ShutdownForce()
+			// Server settings must be in place before initialization: gopls
+			// applies buildFlags when it loads the workspace.
+			client.SetServerSettings(ServerSettings(m.cfg, language))
 			initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			err = initializeLSP(initCtx, client)
 			cancel()
