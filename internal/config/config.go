@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -198,7 +199,13 @@ func save(projectRoot string, cfg *Config, flags int) error {
 // and at most one -tags entry is accepted because the go command resolves
 // repeated -tags last-wins and would silently drop the earlier one.
 func (c *Config) validateBuildFlags() error {
-	for language, lsp := range c.LSP {
+	languages := make([]string, 0, len(c.LSP))
+	for language := range c.LSP {
+		languages = append(languages, language)
+	}
+	sort.Strings(languages)
+	for _, language := range languages {
+		lsp := c.LSP[language]
 		if len(lsp.BuildFlags) == 0 {
 			continue
 		}
