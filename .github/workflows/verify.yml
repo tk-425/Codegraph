@@ -33,41 +33,12 @@ jobs:
         run: go test -tags characterization -run '^TestCharacterization' -count=1 -timeout=180s ./...
       - name: Vet
         run: go vet ./...
-      - name: Format maintained files
-        # Existing formatting debt is recorded in the fix-spec, not auto-fixed here.
-        # Two fixtures keep a layout gofmt would undo: same-line recursion
-        # (T15) and a non-BMP character before a name on one line (T40).
+      - name: Format (whole repo)
+        # Whole-repo gofmt gate closed by S6. Two fixtures keep a layout gofmt
+        # would undo: same-line recursion (T15) and a non-BMP character before
+        # a name on one line (T40).
         run: |
-          unformatted="$(gofmt -l \
-            cmd/codegraph/characterization_test.go \
-            internal/indexer/characterization_test.go \
-            internal/lsp/characterization_test.go \
-            internal/search/characterization_test.go \
-            testdata/characterization \
-            cmd/codegraph/main.go cmd/codegraph/main_test.go \
-            internal/cli/root.go internal/cli/build.go internal/cli/json_output.go \
-            internal/cli/search.go internal/cli/signature.go internal/cli/health.go \
-            internal/cli/stats.go internal/cli/implementations.go \
-            internal/cli/projects.go internal/cli/types.go \
-            internal/config internal/db/manager.go internal/db/readonly_test.go \
-            internal/indexer/indexer.go internal/indexer/hierarchy.go \
-            internal/indexer/scanner.go internal/indexer/indexer_test.go \
-            internal/indexer/transport_test.go internal/ignore/ignore_test.go \
-            internal/lsp/client.go internal/lsp/client_test.go \
-            internal/lsp/manager.go internal/lsp/manager_test.go \
-            internal/lsp/diagnostics.go internal/lsp/lifecycle_test.go \
-            internal/lsp/main_test.go internal/search/orchestrator_test.go \
-            internal/db/models.go internal/db/schema.go internal/db/publish.go \
-            internal/db/quality.go internal/db/quality_test.go \
-            internal/indexer/candidate.go internal/indexer/callgraph.go \
-            internal/indexer/treesitter.go internal/indexer/treesitter_calls.go \
-            internal/indexer/quality_test.go internal/search/db.go internal/search/orchestrator.go \
-            internal/cli/callers.go internal/cli/callees.go internal/cli/health_test.go \
-            cmd/codegraph/quality_test.go cmd/codegraph/compatibility_test.go \
-            internal/db/compatibility_test.go internal/indexer/refresh_test.go \
-            internal/db/search_test.go internal/search/db_test.go \
-            internal/search/ripgrep.go internal/search/ripgrep_test.go \
-            cmd/codegraph/semantics_test.go \
+          unformatted="$(gofmt -l . \
             | awk '!/^testdata\/characterization\/(calls\/lines|positions\/nonbmp)\.go$/')"
           if [ -n "$unformatted" ]; then
             printf '%s\n' "$unformatted"
