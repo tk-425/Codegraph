@@ -53,6 +53,13 @@ func NewManager(cfg *config.Config, rootURI string) *Manager {
 	}
 }
 
+// BuildFlags reports the configured Go build flags for language, if any.
+// The provider identity includes this configured context, so changing it
+// re-extracts the language without --force.
+func (m *Manager) BuildFlags(language string) []string {
+	return BuildFlags(m.cfg, language)
+}
+
 // Server reports the server a GetClient resolution selected for language:
 // its command, arguments and whether it is a native server. The identity
 // is available even when startup then failed, because the refresh
