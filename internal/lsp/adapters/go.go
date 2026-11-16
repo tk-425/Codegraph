@@ -28,7 +28,7 @@ func (a *GoAdapter) NormalizeSymbol(sym *lsp.DocumentSymbol) *lsp.DocumentSymbol
 		parts := strings.Split(sym.Name, ".")
 		sym.Name = parts[len(parts)-1]
 	}
-	
+
 	return sym
 }
 

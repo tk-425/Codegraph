@@ -37,7 +37,7 @@ Example: Don't use CodeGraph for "Where do we handle database connections?" — 
 
 ### Setup & Maintenance (Manual Invoke Only)
 
-**Initialize Project** - Creates `.codegraph/` directory and builds initial index
+**Initialize Project** - Creates missing `.codegraph/` setup artifacts (config, ignore policy, registration); setup-only, no build
 ```bash
 codegraph init
 ```
