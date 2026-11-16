@@ -1,6 +1,7 @@
 package lsp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/url"
@@ -9,17 +10,20 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tk-425/Codegraph/internal/config"
 )
 
-// startSettingsPeer starts the scripted peer with -dump-init and returns the
-// client plus the file the peer appends initialize params to.
-func startSettingsPeer(t *testing.T) (*Client, string) {
+// startSettingsPeer starts the scripted peer and returns the client plus the
+// directory the peer's dump files live in. Extra args compose after the
+// defaults; a repeated -mode overrides the earlier one.
+func startSettingsPeer(t *testing.T, extraArgs ...string) (*Client, string) {
 	t.Helper()
-	dump := filepath.Join(t.TempDir(), "init-params.json")
-	rootURI := (&url.URL{Scheme: "file", Path: t.TempDir()}).String()
-	client, err := NewClient(lifecyclePeer(t), []string{"-mode", "normal", "-dump-init", dump}, rootURI, "go")
+	root := t.TempDir()
+	rootURI := (&url.URL{Scheme: "file", Path: root}).String()
+	args := append([]string{"-mode", "normal", "-dump-init", filepath.Join(root, "init-params.json"), "-dump-config", filepath.Join(root, "config-response.json")}, extraArgs...)
+	client, err := NewClient(lifecyclePeer(t), args, rootURI, "go")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,7 +32,7 @@ func startSettingsPeer(t *testing.T) (*Client, string) {
 			t.Errorf("close: %v", err)
 		}
 	})
-	return client, dump
+	return client, root
 }
 
 // readDumpedInitialize decodes the one initialize params line the peer dumped.
@@ -51,14 +55,14 @@ func readDumpedInitialize(t *testing.T, path string) (InitializeParams, map[stri
 }
 
 func TestInitializeDeliversServerSettings(t *testing.T) {
-	client, dump := startSettingsPeer(t)
+	client, root := startSettingsPeer(t)
 	client.SetServerSettings(map[string]any{"buildFlags": []string{"-tags=characterization,integration"}})
 	ctx, cancel := context.WithTimeout(context.Background(), lifecycleSetup)
 	defer cancel()
 	if _, err := client.Initialize(ctx); err != nil {
 		t.Fatalf("initialize: %v", err)
 	}
-	params, _ := readDumpedInitialize(t, dump)
+	params, _ := readDumpedInitialize(t, filepath.Join(root, "init-params.json"))
 	if params.InitializationOptions == nil {
 		t.Fatalf("initializationOptions absent: %+v", params)
 	}
@@ -72,13 +76,13 @@ func TestInitializeDeliversServerSettings(t *testing.T) {
 }
 
 func TestInitializeWithoutSettingsOmitsSettingsChannel(t *testing.T) {
-	client, dump := startSettingsPeer(t)
+	client, root := startSettingsPeer(t)
 	ctx, cancel := context.WithTimeout(context.Background(), lifecycleSetup)
 	defer cancel()
 	if _, err := client.Initialize(ctx); err != nil {
 		t.Fatalf("initialize: %v", err)
 	}
-	_, raw := readDumpedInitialize(t, dump)
+	_, raw := readDumpedInitialize(t, filepath.Join(root, "init-params.json"))
 	if _, present := raw["initializationOptions"]; present {
 		t.Fatalf("initializationOptions present without settings: %s", raw["initializationOptions"])
 	}
@@ -86,6 +90,66 @@ func TestInitializeWithoutSettingsOmitsSettingsChannel(t *testing.T) {
 		if strings.Contains(string(workspace), "configuration") {
 			t.Fatalf("workspace.configuration advertised without settings: %s", workspace)
 		}
+	}
+}
+
+// waitForConfigDump polls until the peer has dumped the client's
+// configuration response, or fails at the setup budget.
+func waitForConfigDump(t *testing.T, path string) []byte {
+	t.Helper()
+	deadline := time.Now().Add(lifecycleSetup)
+	for {
+		if data, err := os.ReadFile(path); err == nil && len(bytes.TrimSpace(data)) > 0 {
+			return data
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("peer did not report a configuration response: %s", path)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestConfigurationRequestReturnsSettingsPerItem(t *testing.T) {
+	client, root := startSettingsPeer(t, "-mode", "request-configuration")
+	client.SetServerSettings(map[string]any{"buildFlags": []string{"-tags=fixturetag"}})
+	ctx, cancel := context.WithTimeout(context.Background(), lifecycleSetup)
+	defer cancel()
+	if _, err := client.Initialize(ctx); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+	// The peer asks for sections gopls and other after initialized; the
+	// response arrives asynchronously on the reader goroutine.
+	var results []json.RawMessage
+	if err := json.Unmarshal(bytes.TrimSpace(waitForConfigDump(t, filepath.Join(root, "config-response.json"))), &results); err != nil {
+		t.Fatalf("configuration response is not an array: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("results = %s, want one per item", results)
+	}
+	var goplsSection struct {
+		BuildFlags []string `json:"buildFlags"`
+	}
+	if err := json.Unmarshal(results[0], &goplsSection); err != nil {
+		t.Fatalf("gopls item = %s: %v", results[0], err)
+	}
+	if !slices.Equal([]string{"-tags=fixturetag"}, goplsSection.BuildFlags) {
+		t.Fatalf("gopls section buildFlags = %v", goplsSection.BuildFlags)
+	}
+	if string(results[1]) != "null" {
+		t.Fatalf("other section = %s, want null", results[1])
+	}
+}
+
+func TestConfigurationRequestWithoutSettingsOmitsResult(t *testing.T) {
+	client, root := startSettingsPeer(t, "-mode", "request-configuration")
+	ctx, cancel := context.WithTimeout(context.Background(), lifecycleSetup)
+	defer cancel()
+	if _, err := client.Initialize(ctx); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+	// No settings: the pre-existing answer, an empty result array, is kept.
+	if got := string(bytes.TrimSpace(waitForConfigDump(t, filepath.Join(root, "config-response.json")))); got != "[]" {
+		t.Fatalf("configuration response = %s, want the unchanged empty array", got)
 	}
 }
 

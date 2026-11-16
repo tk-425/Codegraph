@@ -526,7 +526,7 @@ func (c *Client) readResponses() {
 			// rust-analyzer, causing "malformed LSP payload" deserialization
 			// errors and panics.
 			if len(message.ID) > 0 && string(message.ID) != "null" {
-				_ = c.respondToServerRequest(message.ID, message.Method)
+				_ = c.respondToServerRequest(message.ID, message.Method, message.Params)
 			}
 			continue
 		}
@@ -583,14 +583,18 @@ func (c *Client) readFrame() ([]byte, error) {
 	return body, nil
 }
 
-func (c *Client) respondToServerRequest(id json.RawMessage, method string) error {
+func (c *Client) respondToServerRequest(id json.RawMessage, method string, params json.RawMessage) error {
 	var result any
 	var responseErr *ResponseError
 	switch method {
 	case "client/registerCapability", "client/unregisterCapability":
 		result = json.RawMessage("null")
 	case "workspace/configuration":
-		result = []any{}
+		if settings := c.ServerSettings(); len(settings) > 0 {
+			result = configurationResults(params, settings)
+		} else {
+			result = []any{}
+		}
 	case "workspace/workspaceFolders":
 		result = []map[string]string{{"uri": c.RootURI, "name": "workspace"}}
 	default:
@@ -606,6 +610,24 @@ func (c *Client) respondToServerRequest(id json.RawMessage, method string) error
 	ctx, cancel := c.withRequestBudget(context.Background())
 	defer cancel()
 	return c.writeFrame(ctx, response)
+}
+
+// configurationResults answers a workspace/configuration request with one
+// entry per item, in order: the server settings for section "gopls" (and
+// for the empty section, which names the whole configuration of this
+// single-server client), null for any other section.
+func configurationResults(params json.RawMessage, settings map[string]any) []any {
+	var request ConfigurationParams
+	_ = json.Unmarshal(params, &request)
+	results := make([]any, 0, len(request.Items))
+	for _, item := range request.Items {
+		if item.Section == "gopls" || item.Section == "" {
+			results = append(results, settings)
+		} else {
+			results = append(results, nil)
+		}
+	}
+	return results
 }
 
 // DocumentSymbols requests symbols from a document

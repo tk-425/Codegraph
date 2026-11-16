@@ -61,6 +61,19 @@ type WorkspaceSymbolClientCapabilities struct {
 	DynamicRegistration bool `json:"dynamicRegistration,omitempty"`
 }
 
+// ConfigurationParams is the server's request for client configuration
+// (LSP 3.17); one result per item is returned in order.
+type ConfigurationParams struct {
+	Items []ConfigurationItem `json:"items"`
+}
+
+// ConfigurationItem names the configuration an item wants. A section of
+// "gopls" asks for this client's gopls settings object.
+type ConfigurationItem struct {
+	ScopeURI string `json:"scopeUri"`
+	Section  string `json:"section"`
+}
+
 // InitializeResult returned by server after initialization
 type InitializeResult struct {
 	Capabilities ServerCapabilities `json:"capabilities"`

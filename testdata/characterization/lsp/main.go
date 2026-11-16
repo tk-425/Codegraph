@@ -18,12 +18,16 @@ type request struct {
 	ID     json.RawMessage `json:"id"`
 	Method string          `json:"method"`
 	Params json.RawMessage `json:"params"`
+	// Result carries the payload when this message is a response to a
+	// request this peer sent (request-configuration mode).
+	Result json.RawMessage `json:"result"`
 }
 
 func main() {
 	mode := flag.String("mode", "normal", "normal, exit-on-probe, block-after-initialize, ignore-exit, or <framing>-on-probe")
 	fixture := flag.String("responses", "", "method-to-result JSON fixture")
 	dumpInit := flag.String("dump-init", "", "append each initialize request's params JSON to this file")
+	dumpConfig := flag.String("dump-config", "", "in request-configuration mode, append the client's configuration response JSON to this file")
 	pidfile := flag.String("pidfile", "", "write this process ID to the file before serving")
 	flag.Parse()
 	if *pidfile != "" {
@@ -32,13 +36,13 @@ func main() {
 			os.Exit(2)
 		}
 	}
-	if err := serve(*mode, *fixture, *dumpInit); err != nil {
+	if err := serve(*mode, *fixture, *dumpInit, *dumpConfig); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
 }
 
-func serve(mode, fixture, dumpInit string) error {
+func serve(mode, fixture, dumpInit, dumpConfig string) error {
 	results := map[string]json.RawMessage{}
 	if fixture != "" {
 		data, err := os.ReadFile(fixture)
@@ -65,6 +69,37 @@ func serve(mode, fixture, dumpInit string) error {
 				hang()
 			}
 			return nil
+		}
+		if message.Method == "initialized" && mode == "request-configuration" {
+			items := map[string]any{"items": []map[string]string{
+				{"scopeUri": rootURI, "section": "gopls"},
+				{"scopeUri": rootURI, "section": "other"},
+			}}
+			body, err := json.Marshal(struct {
+				JSONRPC string `json:"jsonrpc"`
+				ID      int    `json:"id"`
+				Method  string `json:"method"`
+				Params  any    `json:"params"`
+			}{"2.0", 1, "workspace/configuration", items})
+			if err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintf(os.Stdout, "Content-Length: %d\r\n\r\n%s", len(body), body); err != nil {
+				return err
+			}
+			continue
+		}
+		if mode == "request-configuration" && message.Method == "" && len(message.ID) > 0 {
+			// The client's response to our configuration request; an omitted
+			// result is recorded as null.
+			payload := message.Result
+			if payload == nil {
+				payload = json.RawMessage("null")
+			}
+			if err := appendFile(dumpConfig, payload); err != nil {
+				return err
+			}
+			continue
 		}
 		if len(message.ID) == 0 {
 			continue
