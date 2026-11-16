@@ -213,6 +213,28 @@ func TestLoadAppliesConfiguredGoBuildFlags(t *testing.T) {
 	if !slices.Equal(cfg.LSP["go"].BuildFlags, want) {
 		t.Fatalf("build flags = %v, want %v", cfg.LSP["go"].BuildFlags, want)
 	}
+	root := t.TempDir()
+	if err := Save(root, cfg); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := Load(root)
+	if err != nil || !slices.Equal(reloaded.LSP["go"].BuildFlags, want) {
+		t.Fatalf("build flags did not survive save/load: config=%+v err=%v", reloaded, err)
+	}
+}
+
+func TestDefaultConfigOmitsBuildFlags(t *testing.T) {
+	root := t.TempDir()
+	if err := Save(root, DefaultConfig()); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, DefaultConfigDir, "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte("build_flags")) {
+		t.Fatal("default config unexpectedly writes build_flags")
+	}
 }
 
 func TestLoadRejectsInvalidBuildFlags(t *testing.T) {

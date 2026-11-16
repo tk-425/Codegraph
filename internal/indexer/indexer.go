@@ -600,7 +600,7 @@ func providerDigest(language string, mgr *lsp.Manager, client *lsp.Client) strin
 	// extraction under a different context is a different provider result.
 	// Absent flags append nothing, so existing digests are unchanged.
 	if flags := mgr.BuildFlags(language); len(flags) > 0 {
-		fmt.Fprintf(h, ";buildFlags=%v", flags)
+		fmt.Fprintf(h, ";buildFlags=%q", flags)
 	}
 	if client != nil {
 		caps := client.Capabilities()

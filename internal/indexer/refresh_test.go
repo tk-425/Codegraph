@@ -333,6 +333,18 @@ func TestProviderDigestBuildFlagsShape(t *testing.T) {
 	if otherFlags == withFlags {
 		t.Fatal("different build flags produced the same provider digest")
 	}
+
+	// One argument containing a space is not two arguments. Both lists
+	// formatted identically with %v, hiding a build-context change.
+	server.BuildFlags = []string{"-tags=a -mod=vendor"}
+	p.cfg.LSP["go"] = server
+	singleArgument := providerDigest("go", lsp.NewManager(p.cfg, "file://"+p.root), nil)
+	server.BuildFlags = []string{"-tags=a", "-mod=vendor"}
+	p.cfg.LSP["go"] = server
+	separateArguments := providerDigest("go", lsp.NewManager(p.cfg, "file://"+p.root), nil)
+	if singleArgument == separateArguments {
+		t.Fatal("argument boundaries did not participate in the provider digest")
+	}
 }
 
 // R02: a valid prior-generation snapshot must refresh on an extractor change,

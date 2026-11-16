@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/tk-425/Codegraph/internal/config"
+	"github.com/tk-425/Codegraph/internal/db"
 )
 
 // runCLIIntegration is runCLI with a watchdog sized for real server startup.
@@ -207,18 +208,75 @@ func TestIntegrationGoplsBuildContext(t *testing.T) {
 		}
 		return append(env, "CODEGRAPH_CLI_CHILD=1", "HOME="+root)
 	}
+	buildSnapshot := func(result cliResult, changed bool) *db.Snapshot {
+		t.Helper()
+		output := requireOneEnvelope(t, result)
+		if result.exit != 0 || output.Command != "build" || len(output.Errors) != 0 {
+			t.Fatalf("build failed: exit=%d stdout=%s stderr=%s", result.exit, result.stdout, result.stderr)
+		}
+		var report struct {
+			Metadata struct {
+				Snapshot *db.Snapshot     `json:"snapshot"`
+				Attempt  *db.BuildAttempt `json:"attempt"`
+			} `json:"metadata"`
+		}
+		if err := json.Unmarshal(result.stdout, &report); err != nil {
+			t.Fatal(err)
+		}
+		attempt := report.Metadata.Attempt
+		if report.Metadata.Snapshot == nil || attempt == nil || attempt.Outcome != "succeeded" || attempt.Changed != changed {
+			t.Fatalf("build did not publish the expected changed=%t attempt: %s", changed, result.stdout)
+		}
+		if changed {
+			semanticCalls := false
+			for _, phase := range attempt.Phases {
+				if phase.Language == "go" && phase.Phase == "calls" && phase.Provider == "lsp" && (phase.Status == "complete" || phase.Status == "failed") {
+					semanticCalls = true
+				}
+			}
+			if !semanticCalls {
+				t.Fatalf("build did not execute the Go semantic calls phase: %s", result.stdout)
+			}
+		}
+		return report.Metadata.Snapshot
+	}
 	countRequestFailed := func(result cliResult) int {
+		t.Helper()
 		envelope := requireOneEnvelope(t, result)
 		count := 0
 		for _, raw := range envelope.Results {
 			var record struct {
 				Category string `json:"category"`
 			}
-			if err := json.Unmarshal(raw, &record); err == nil && record.Category == "request_failed" {
+			if err := json.Unmarshal(raw, &record); err != nil {
+				t.Fatal(err)
+			}
+			if record.Category == "request_failed" {
 				count++
 			}
 		}
 		return count
+	}
+	requireTaggedCaller := func(env []string) {
+		t.Helper()
+		callers := runCLIIntegrationEnv(t, root, 60*time.Second, env, "callers", "Base", "--json")
+		output := requireOneEnvelope(t, callers)
+		if callers.exit != 0 || len(output.Errors) != 0 {
+			t.Fatalf("callers exit=%d stdout=%s stderr=%s", callers.exit, callers.stdout, callers.stderr)
+		}
+		for _, raw := range output.Results {
+			var record struct {
+				Name     string   `json:"name"`
+				Evidence []string `json:"evidence"`
+			}
+			if err := json.Unmarshal(raw, &record); err != nil {
+				t.Fatal(err)
+			}
+			if record.Name == "TaggedCaller" && slices.Contains(record.Evidence, "lsp-call-hierarchy") {
+				return
+			}
+		}
+		t.Fatalf("callers Base does not include the custom-tagged caller with LSP evidence: %s", callers.stdout)
 	}
 
 	// SC2: configured tags, ambient GOFLAGS scrubbed. The tagged file has
@@ -234,24 +292,13 @@ func TestIntegrationGoplsBuildContext(t *testing.T) {
 		t.Fatalf("flagged build reported %d request_failed records; the configured build context did not reach gopls: %s", failures, build.stdout)
 	}
 
-	callers := runCLIIntegrationEnv(t, root, 60*time.Second, envWithoutGOFLAGS(), "callers", "Base", "--json")
-	if callers.exit != 0 {
-		t.Fatalf("callers exit=%d stdout=%s stderr=%s", callers.exit, callers.stdout, callers.stderr)
-	}
-	taggedCaller := false
-	for _, raw := range requireOneEnvelope(t, callers).Results {
-		var record struct {
-			Name     string   `json:"name"`
-			Evidence []string `json:"evidence"`
-		}
-		if err := json.Unmarshal(raw, &record); err == nil && record.Name == "TaggedCaller" {
-			if slices.Contains(record.Evidence, "lsp-call-hierarchy") {
-				taggedCaller = true
-			}
-		}
-	}
-	if !taggedCaller {
-		t.Fatalf("callers Base does not include the custom-tagged caller with LSP evidence: %s", callers.stdout)
+	initial := buildSnapshot(build, true)
+	requireTaggedCaller(envWithoutGOFLAGS())
+
+	// A control with the same context must reuse the existing publication.
+	noop := runCLIIntegrationEnv(t, root, 120*time.Second, envWithoutGOFLAGS(), "build", "--json")
+	if snapshot := buildSnapshot(noop, false); snapshot.ID != initial.ID {
+		t.Fatalf("unchanged context replaced the snapshot: %s != %s", snapshot.ID, initial.ID)
 	}
 
 	// SC4: removing the flags re-extracts the language without --force; the
@@ -267,6 +314,11 @@ func TestIntegrationGoplsBuildContext(t *testing.T) {
 		t.Fatal("removing build_flags did not re-extract under the default context; no request_failed records")
 	}
 
+	removed := buildSnapshot(unflagged, true)
+	if removed.ProviderDigest == initial.ProviderDigest || removed.ID == initial.ID {
+		t.Fatal("removing build_flags retained the old provider identity or snapshot")
+	}
+
 	// SC4: restoring the flags invalidates again; failures clear.
 	if err := config.Save(root, flaggedConfig); err != nil {
 		t.Fatal(err)
@@ -279,6 +331,12 @@ func TestIntegrationGoplsBuildContext(t *testing.T) {
 		t.Fatalf("restored build reported %d request_failed records: %s", failures, restored.stdout)
 	}
 
+	restoredSnapshot := buildSnapshot(restored, true)
+	if restoredSnapshot.ID == removed.ID || restoredSnapshot.ProviderDigest != initial.ProviderDigest {
+		t.Fatal("restoring build_flags did not publish the original provider context again")
+	}
+	requireTaggedCaller(envWithoutGOFLAGS())
+
 	// SC3: an ambient GOFLAGS -tags entry conflicts with the configured one;
 	// the configured tags win (go resolves repeated -tags last-wins), so the
 	// forced rebuild still sees package metadata for the tagged file.
@@ -289,4 +347,6 @@ func TestIntegrationGoplsBuildContext(t *testing.T) {
 	if failures := countRequestFailed(precedence); failures != 0 {
 		t.Fatalf("ambient GOFLAGS defeated the configured tags: %d request_failed records: %s", failures, precedence.stdout)
 	}
+	buildSnapshot(precedence, true)
+	requireTaggedCaller(append(envWithoutGOFLAGS(), "GOFLAGS=-tags=other"))
 }
