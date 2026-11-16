@@ -2,6 +2,63 @@
 
 ## Unreleased
 
+## v0.10.7 (2026-11-15)
+
+- Registry updates are serialized by a sibling lock file and published atomically
+  (same-directory temporary file, fsync, rename); concurrent `init` runs retain every
+  completed registration, and interrupted saves never leave a truncated registry.
+- `prune` revalidates its approved missing candidates under the update lock;
+  unrelated or concurrently refreshed registrations survive.
+
+## v0.10.6 (2026-11-13)
+
+- Automatic Java setup passes `-data <project>/.codegraph/jdtls-workspace` per project,
+  isolating generated workspace state; custom commands and explicit workspace arguments
+  remain authoritative and are never silently rewritten.
+
+## v0.10.5 (2026-11-13)
+
+- Build and health share one effective-server resolver, including native TypeScript
+  (`tsc --lsp --stdio`) selection for TypeScript 7+ projects.
+- `health` reports the effective command/arguments and executable availability,
+  explicitly marks initialization and capabilities as unchecked, and never starts servers.
+
+## v0.10.4 (2026-11-12)
+
+- Re-running `init` creates missing artifacts without rewriting an existing
+  `config.toml` or `.cgignore`; writes are create-only.
+- `init` reports created versus preserved paths, remains setup-only (no implicit build)
+  and keeps the managed agent note idempotent.
+
+## v0.10.3 (2026-11-12)
+
+- `signature` preserves the full LSP `detail` string and syntax declaration headers
+  (including multiline declarations and known OCaml annotations) instead of reducing
+  them to a return type; missing information is labelled, never invented.
+- JSON adds `documentation`, `signature_status` and `documentation_status`; human
+  output labels unavailable information explicitly.
+- An extractor revision participates in provider invalidation: an ordinary build
+  refreshes prior extractor output even when the source bytes are unchanged.
+
+## v0.10.2 (2026-11-12)
+
+- `callers`/`callees` reject any `--depth` other than 1 with `not_implemented` before
+  project setup; malformed depth values fail with `invalid_arguments`.
+- `types` consistently reports unsupported with a nonzero exit in human and JSON modes.
+- Help and tracked documentation state the one-hop and unsupported-`types` contracts.
+
+## v0.10.1 (2026-11-11)
+
+- Stored symbol search treats queries as literal data: SQL `%`/`_` wildcards are
+  escaped, and exact-name search shares kind/language/default-module filters. Negative
+  `--limit` values fail validation.
+- A stored miss with `--exact` or `--kind` skips text fallback explicitly (stderr plus
+  `metadata.search.skipped_tiers`) instead of fabricating symbol matches.
+- Text fallback reuses the build scanner's file eligibility (default exclusions and
+  `.codegraph/.cgignore` negations) and literal ripgrep matching.
+
+## v0.10.0 (2026-11-11)
+
 ### Quality and provenance
 
 - Add snapshot quality, build-attempt outcomes, extraction provenance and relationship

@@ -8,23 +8,17 @@
 
 ## 🚀 Features
 
-- **Multi-Language Support**:
-  - **Full Support** (LSP + Call Graph):
-    - ✅ **Go** (via `gopls`)
-    - ✅ **Python** (via `pyright`)
-    - ✅ **TypeScript / JavaScript** (via `typescript-language-server`)
-    - ✅ **React (TSX/JSX)**
-    - ✅ **Rust** (via `rust-analyzer`)
-    - ✅ **Java** (via `jdtls`)
-  - **Partial Support** (Symbol Search only):
-    - ⚠️ **Swift** (via Tree-Sitter)
-    - ⚠️ **OCaml** (via Tree-Sitter)
-    - ⚠️ **C, C++, C#** (via Tree-Sitter)
+- **Multi-Language Support**: automatic language-server integration for Go (`gopls`),
+  Python (`pyright`), TypeScript/JavaScript and TSX/JSX (native `tsc --lsp` or
+  `typescript-language-server`), Java (`jdtls`), Rust (`rust-analyzer`), Swift
+  (`sourcekit-lsp`) and OCaml (`ocamllsp`), with Tree-sitter symbol extraction as the
+  fallback tier (and the only tier for C, C++ and C#). See
+  [Language capabilities](#language-capabilities-and-verification) for what is verified.
 - **Precise Call Graphs**: Uses actual compiler/LSP data, not just regex matching.
 - **Local & Offline**: All data is stored in `.codegraph/` within your project. No cloud upload.
 - **Incremental Indexing**: Only re-indexes files that have changed.
 - **Global Registry**: internal registry tracks all your projects (`codegraph projects`).
-- **Resilient**: Falls back to Tree-Sitter or regex parsing if LSPs are unavailable.
+- **Resilient**: Falls back to Tree-sitter syntax extraction when a language server is unavailable; fallback output is labelled as syntax-extracted, never as semantic.
 
 ## 📦 Installation
 
@@ -40,11 +34,11 @@ go build -o codegraph ./cmd/codegraph
 mv codegraph /usr/local/bin/
 ```
 
-### Upgrading from v0.9.0 (unreleased changes)
+### Upgrading from v0.9.0 (shipped in v0.10.0+)
 
 Existing **format-2 indexes remain readable without a rebuild**. Symbol identities,
 call endpoints and existing stored fields keep their meanings. No `build --force`
-is required for this upgrade; see the [unreleased notes](CHANGELOG.md#unreleased).
+is required for this upgrade; see the [v0.10.0 notes](CHANGELOG.md#v0100-2026-11-11).
 
 - Queries stay read-only. Before the first newer build, optional snapshot/attempt
   metadata is unavailable, historical relationship evidence is `unknown`, and
@@ -80,6 +74,28 @@ CodeGraph works best with Language Servers installed for precise call graphs and
 - **Swift**: Included with Xcode (`sourcekit-lsp`)
 - **OCaml**: `opam install ocaml-lsp-server`
 
+### Language capabilities and verification
+
+Symbol extraction runs through the configured language server when one starts and
+falls back to Tree-sitter syntax extraction otherwise; the extraction provider is
+recorded per file and surfaced in query output. Semantic call and hierarchy results
+depend on the server advertising the capability; syntax-inferred calls are labelled
+as such and never presented as semantic.
+
+| Language | Default server | Verified in this repository's checks |
+| :--- | :--- | :--- |
+| Go | `gopls` | Real-server end-to-end: build, distinct method identities, search and stored call queries. Opt in with `go test -tags integration -count=1 ./cmd/codegraph` (requires `gopls` on PATH; skips explicitly without it). |
+| Python | `pyright-langserver` | Automatic selection and transport behaviour with scripted protocol peers; no real-server run. |
+| TypeScript / JavaScript / TSX / JSX | native `tsc --lsp` (TS 7+) or `typescript-language-server` | Selection and transport with scripted peers and resolver tests; TSX/JSX extraction limitations are documented; no real-server run. |
+| Java | `jdtls` (per-project `-data` workspace) | Effective-argument and health-selection tests with isolated executable fixtures; no real-server run. |
+| Rust | `rust-analyzer` | Selection only; no real-server run. |
+| Swift | `sourcekit-lsp` | Selection only; no real-server run. |
+| OCaml | `ocamllsp` | Syntax declaration-header extraction (Tree-sitter); no real-server run. |
+| C, C++, C# | none configured | Tree-sitter symbol extraction fixtures only. |
+
+A skip in the opt-in integration suite is an explicitly unverified capability, not a
+passing check; CI runs the offline suite only.
+
 ## ⚡ Quick Start
 
 1.  **Initialize a Project**
@@ -89,7 +105,7 @@ CodeGraph works best with Language Servers installed for precise call graphs and
     codegraph init
     ```
 
-    This will detect languages, create `.codegraph/config.toml`, seed `.codegraph/.cgignore` from `.gitignore` when present, and start the initial index.
+    This detects languages, creates `.codegraph/config.toml`, seeds `.codegraph/.cgignore` from `.gitignore` when present, and registers the project. `init` is setup-only: run `codegraph build` to create the initial index.
 
     After initialization, CodeGraph uses `.codegraph/.cgignore` as the indexing policy. If you edit that file, rerun `codegraph build` to refresh the database.
 
@@ -114,7 +130,7 @@ CodeGraph works best with Language Servers installed for precise call graphs and
     ```
 
 4.  **Check Health**
-    Verify database status and LSP connections:
+    Check configuration, index quality and effective LSP server availability (no servers are started):
     ```bash
     codegraph health
     ```
@@ -226,11 +242,11 @@ CodeGraph exposes **Skills** that allow AI agents to use these tools directly.
 
 ### Usage with Claude / Gemini
 
-1.  Copy the content of `cc-skills/CODE-GRAPH.md`.
+1.  Copy the content of [`cc-skills/SKILL.md`](cc-skills/SKILL.md).
 2.  Paste it into your AI session's system prompt or initial context.
 3.  The agent will now know how to "Use search to find X" or "Trace the callers of Y".
 
-See [cc-skills/README.md](cc-skills/README.md) for more details.
+The full skill, including troubleshooting guidance, is [`cc-skills/SKILL.md`](cc-skills/SKILL.md).
 
 ## 🏗️ Architecture
 
@@ -240,9 +256,7 @@ CodeGraph uses a **hybrid architecture**:
 2.  **LSP Client**: Connects to language servers (std-io).
 3.  **Indexer**: Extracts symbols and references.
 4.  **Database**: SQLite (`.codegraph/graphs/codegraph.db`) stores the graph.
-5.  **Registry**: Global JSON file (`~/.codegraph/registry.json`) tracks projects.
-
-For a deep dive, see [.docs/Architecture.md](.docs/Architecture.md).
+5.  **Registry**: Global JSON file (`~/.codegraph/registry.json`) tracks projects, updated atomically under a sibling lock.
 
 ## 📄 License
 
