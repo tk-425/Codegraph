@@ -53,6 +53,13 @@ func NewManager(cfg *config.Config, rootURI string) *Manager {
 	}
 }
 
+// BuildFlags reports the configured Go build flags for language, if any.
+// The provider identity includes this configured context, so changing it
+// re-extracts the language without --force.
+func (m *Manager) BuildFlags(language string) []string {
+	return BuildFlags(m.cfg, language)
+}
+
 // Server reports the server a GetClient resolution selected for language:
 // its command, arguments and whether it is a native server. The identity
 // is available even when startup then failed, because the refresh
@@ -107,6 +114,9 @@ func (m *Manager) GetClient(ctx context.Context, language string) (*Client, erro
 			client.requestTimeout = m.cfg.LSPTimeouts.Request()
 			client.gracefulTimeout = m.cfg.LSPTimeouts.ShutdownGraceful()
 			client.forceTimeout = m.cfg.LSPTimeouts.ShutdownForce()
+			// Server settings must be in place before initialization: gopls
+			// applies buildFlags when it loads the workspace.
+			client.SetServerSettings(ServerSettings(m.cfg, language))
 			initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			err = initializeLSP(initCtx, client)
 			cancel()
