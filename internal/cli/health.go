@@ -178,6 +178,9 @@ func lspHealthRecords(cfg *config.Config, projectRoot string) []healthRecord {
 			record.Detail = "configuration: " + err.Error() + unchecked
 		} else {
 			detail := fmt.Sprintf("command=%q; args=%q; ", server.Command, server.Args)
+			if flags := lsp.BuildFlags(cfg, language); len(flags) > 0 {
+				detail += fmt.Sprintf("build_flags=%q; ", flags)
+			}
 			if _, err := exec.LookPath(server.Command); err != nil {
 				record.Detail = detail + "executable unavailable: " + err.Error() + unchecked
 			} else {

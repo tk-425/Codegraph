@@ -203,3 +203,56 @@ func TestLoadRejectsNonPositiveLSPTimeouts(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadAppliesConfiguredGoBuildFlags(t *testing.T) {
+	cfg, err := Load(writeTestConfig(t, "[lsp.go]\nbuild_flags = [\"-tags=characterization,integration\"]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"-tags=characterization,integration"}
+	if !slices.Equal(cfg.LSP["go"].BuildFlags, want) {
+		t.Fatalf("build flags = %v, want %v", cfg.LSP["go"].BuildFlags, want)
+	}
+	root := t.TempDir()
+	if err := Save(root, cfg); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := Load(root)
+	if err != nil || !slices.Equal(reloaded.LSP["go"].BuildFlags, want) {
+		t.Fatalf("build flags did not survive save/load: config=%+v err=%v", reloaded, err)
+	}
+}
+
+func TestDefaultConfigOmitsBuildFlags(t *testing.T) {
+	root := t.TempDir()
+	if err := Save(root, DefaultConfig()); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, DefaultConfigDir, "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte("build_flags")) {
+		t.Fatal("default config unexpectedly writes build_flags")
+	}
+}
+
+func TestLoadRejectsInvalidBuildFlags(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"non-go language", "[lsp.python]\nbuild_flags = [\"-tags=x\"]\n", "only supported for go"},
+		{"entry without dash", "[lsp.go]\nbuild_flags = [\"tags=x\"]\n", "must start with"},
+		{"duplicate tags", "[lsp.go]\nbuild_flags = [\"-tags=a\", \"-tags=b\"]\n", "at most one -tags"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Load(writeTestConfig(t, test.body))
+			if err == nil || !bytes.Contains([]byte(err.Error()), []byte(test.want)) {
+				t.Fatalf("err = %v, want it to contain %q", err, test.want)
+			}
+		})
+	}
+}

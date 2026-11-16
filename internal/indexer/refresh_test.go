@@ -13,6 +13,7 @@ import (
 
 	"github.com/tk-425/Codegraph/internal/config"
 	"github.com/tk-425/Codegraph/internal/db"
+	"github.com/tk-425/Codegraph/internal/lsp"
 )
 
 // refreshProject is an ordinary (untagged) harness for refresh behaviour:
@@ -264,6 +265,85 @@ func TestProviderConfigChangeReextracts(t *testing.T) {
 	}
 	if symbols := p.symbols(t, "Orphan"); len(symbols) != 1 {
 		t.Errorf("T07: re-extraction lost Orphan: %+v", symbols)
+	}
+}
+
+// The configured Go build context is provider identity (SC4): changing it
+// re-extracts the language without source edits or --force, and absent
+// flags leave the digest byte-for-byte as it was before build flags existed.
+func TestBuildFlagsChangeReextracts(t *testing.T) {
+	p := newRefreshProject(t)
+	p.write(t, "source.go", goWithOrphan)
+	if err := p.build(t, true); err != nil {
+		t.Fatal(err)
+	}
+	orphan := p.symbols(t, "Orphan")
+	if len(orphan) != 1 {
+		t.Fatalf("fixture did not publish Orphan: %+v", orphan)
+	}
+	before, err := p.database.GetFileMeta(orphan[0].File)
+	if err != nil || before == nil {
+		t.Fatalf("initial metadata: %+v, %v", before, err)
+	}
+	// Unchanged context: the file is not re-extracted.
+	if err := p.build(t, false); err != nil {
+		t.Fatal(err)
+	}
+	unchanged, err := p.database.GetFileMeta(orphan[0].File)
+	if err != nil || unchanged == nil || !unchanged.ExtractedAt.Equal(before.ExtractedAt) {
+		t.Fatalf("control: unchanged build flags re-extracted: before=%+v after=%+v error=%v", before, unchanged, err)
+	}
+
+	server := p.cfg.LSP["go"]
+	server.BuildFlags = []string{"-tags=characterization"}
+	p.cfg.LSP["go"] = server
+	if err := p.build(t, false); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := p.database.GetFileMeta(orphan[0].File)
+	if err != nil || changed == nil || !changed.ExtractedAt.After(before.ExtractedAt) {
+		t.Errorf("changed build flags did not re-extract without --force: before=%+v after=%+v error=%v", before, changed, err)
+	}
+	if symbols := p.symbols(t, "Orphan"); len(symbols) != 1 {
+		t.Errorf("re-extraction lost Orphan: %+v", symbols)
+	}
+}
+
+func TestProviderDigestBuildFlagsShape(t *testing.T) {
+	p := newRefreshProject(t)
+	// No resolved server and no live client: the fallback digest shape,
+	// byte-identical to its pre-build-flags form when no flags are set.
+	without := providerDigest("go", lsp.NewManager(p.cfg, "file://"+p.root), nil)
+	legacy := fmt.Sprintf("format=%d;extractor=%d;command=<none>;provider=tree-sitter", db.FormatVersion, extractorRevision)
+	if without != fmt.Sprintf("%x", sha256.Sum256([]byte(legacy))) {
+		t.Fatalf("digest without flags changed shape: %s != sha256(%q)", without, legacy)
+	}
+
+	server := p.cfg.LSP["go"]
+	server.BuildFlags = []string{"-tags=characterization"}
+	p.cfg.LSP["go"] = server
+	withFlags := providerDigest("go", lsp.NewManager(p.cfg, "file://"+p.root), nil)
+	if withFlags == without {
+		t.Fatal("configured build flags did not change the provider digest")
+	}
+
+	server.BuildFlags = []string{"-tags=integration"}
+	p.cfg.LSP["go"] = server
+	otherFlags := providerDigest("go", lsp.NewManager(p.cfg, "file://"+p.root), nil)
+	if otherFlags == withFlags {
+		t.Fatal("different build flags produced the same provider digest")
+	}
+
+	// One argument containing a space is not two arguments. Both lists
+	// formatted identically with %v, hiding a build-context change.
+	server.BuildFlags = []string{"-tags=a -mod=vendor"}
+	p.cfg.LSP["go"] = server
+	singleArgument := providerDigest("go", lsp.NewManager(p.cfg, "file://"+p.root), nil)
+	server.BuildFlags = []string{"-tags=a", "-mod=vendor"}
+	p.cfg.LSP["go"] = server
+	separateArguments := providerDigest("go", lsp.NewManager(p.cfg, "file://"+p.root), nil)
+	if singleArgument == separateArguments {
+		t.Fatal("argument boundaries did not participate in the provider digest")
 	}
 }
 

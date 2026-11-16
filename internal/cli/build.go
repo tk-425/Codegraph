@@ -90,6 +90,9 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return withCode("config_load_failed", fmt.Errorf("failed to load config: %w", err))
 	}
+	if !jsonOutputFlag {
+		printBuildContext(cmd.OutOrStdout(), cfg)
+	}
 
 	ctx := commandContext(cmd)
 
@@ -170,6 +173,14 @@ func runBuild(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(cmd.OutOrStdout(), "Snapshot %s: %s (freshness unchecked)\n", snapshot.ID, snapshot.Quality)
 	}
 	return nil
+}
+
+// printBuildContext shows the effective Go build context once, when the
+// project configures one. The JSON path never decorates.
+func printBuildContext(out io.Writer, cfg *config.Config) {
+	if flags := lsp.BuildFlags(cfg, "go"); len(flags) > 0 {
+		fmt.Fprintf(out, "🏷  Go build context: %s\n", Info(strings.Join(flags, " ")))
+	}
 }
 
 // printDiagnostics renders diagnostics for the human-readable build path. A

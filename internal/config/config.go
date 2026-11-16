@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
@@ -58,6 +60,10 @@ func (t LSPTimeoutsConfig) validate() error {
 type LSPConfig struct {
 	Command string   `toml:"command"`
 	Args    []string `toml:"args"`
+	// BuildFlags are gopls buildFlags: flags passed to go list so semantic
+	// extraction runs in the project's intended build context. Configured
+	// under [lsp.go]; validated by Load for every other language.
+	BuildFlags []string `toml:"build_flags,omitempty"`
 }
 
 // SearchConfig represents search configuration
@@ -142,6 +148,9 @@ func Load(projectRoot string) (*Config, error) {
 	if err := cfg.LSPTimeouts.validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
+	if err := cfg.validateBuildFlags(); err != nil {
+		return nil, fmt.Errorf("invalid config: %w", err)
+	}
 
 	return cfg, nil
 }
@@ -182,6 +191,40 @@ func save(projectRoot string, cfg *Config, flags int) error {
 		return fmt.Errorf("failed to write config: %w", err)
 	}
 
+	return nil
+}
+
+// validateBuildFlags rejects build flags that cannot do what they promise.
+// They are gopls's buildFlags setting (Go only); every entry must be a flag;
+// and at most one -tags entry is accepted because the go command resolves
+// repeated -tags last-wins and would silently drop the earlier one.
+func (c *Config) validateBuildFlags() error {
+	languages := make([]string, 0, len(c.LSP))
+	for language := range c.LSP {
+		languages = append(languages, language)
+	}
+	sort.Strings(languages)
+	for _, language := range languages {
+		lsp := c.LSP[language]
+		if len(lsp.BuildFlags) == 0 {
+			continue
+		}
+		if language != "go" {
+			return fmt.Errorf("lsp.%s.build_flags is only supported for go", language)
+		}
+		tags := 0
+		for _, flag := range lsp.BuildFlags {
+			if !strings.HasPrefix(flag, "-") {
+				return fmt.Errorf("lsp.go.build_flags entries must start with '-', got %q", flag)
+			}
+			if flag == "-tags" || strings.HasPrefix(flag, "-tags=") {
+				tags++
+			}
+		}
+		if tags > 1 {
+			return fmt.Errorf("lsp.go.build_flags accepts at most one -tags entry; combine tag sets comma-separated in one entry")
+		}
+	}
 	return nil
 }
 
