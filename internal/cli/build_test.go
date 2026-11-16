@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tk-425/Codegraph/internal/config"
 	"github.com/tk-425/Codegraph/internal/lsp"
 )
 
@@ -93,6 +94,29 @@ func TestPrintDiagnosticsStillRendersStartupFailuresAsUnavailable(t *testing.T) 
 	}
 	if !strings.Contains(rendered, "Documentation: https://github.com/eclipse-jdtls/eclipse.jdt.ls") {
 		t.Errorf("startup failure lost its installation guidance: %q", rendered)
+	}
+}
+
+func TestPrintBuildContextShowsConfiguredGoFlags(t *testing.T) {
+	cfg := config.DefaultConfig()
+	goCfg := cfg.LSP["go"]
+	goCfg.BuildFlags = []string{"-tags=characterization,integration"}
+	cfg.LSP["go"] = goCfg
+
+	var out bytes.Buffer
+	printBuildContext(&out, cfg)
+	rendered := out.String()
+
+	if !strings.Contains(rendered, "Go build context: -tags=characterization,integration") {
+		t.Errorf("build context line = %q", rendered)
+	}
+}
+
+func TestPrintBuildContextSilentWithoutFlags(t *testing.T) {
+	var out bytes.Buffer
+	printBuildContext(&out, config.DefaultConfig())
+	if out.Len() != 0 {
+		t.Errorf("build context line without flags = %q", out.String())
 	}
 }
 

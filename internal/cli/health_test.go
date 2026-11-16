@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/tk-425/Codegraph/internal/config"
 	"github.com/tk-425/Codegraph/internal/db"
 )
 
@@ -317,5 +318,26 @@ func TestOpenProjectWording(t *testing.T) {
 				t.Errorf("manager returned = %v for code %q", dbm != nil, tc.code)
 			}
 		})
+	}
+}
+
+func TestLspHealthRecordsIncludeGoBuildFlags(t *testing.T) {
+	cfg := config.DefaultConfig()
+	goCfg := cfg.LSP["go"]
+	goCfg.BuildFlags = []string{"-tags=characterization,integration"}
+	cfg.LSP["go"] = goCfg
+
+	records := lspHealthRecords(cfg, t.TempDir())
+	var goRecord *healthRecord
+	for i := range records {
+		if records[i].Name == "go" {
+			goRecord = &records[i]
+		}
+	}
+	if goRecord == nil {
+		t.Fatal("no go lsp record")
+	}
+	if !strings.Contains(goRecord.Detail, `build_flags=["-tags=characterization,integration"]`) {
+		t.Fatalf("go detail = %q", goRecord.Detail)
 	}
 }
