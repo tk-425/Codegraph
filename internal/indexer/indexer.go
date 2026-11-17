@@ -582,7 +582,8 @@ func fingerprint(content []byte) string {
 }
 
 // Increment when extraction semantics change without changing the index format.
-const extractorRevision = 1
+// Revision 2 initializes the project workspace through LSP workspace folders.
+const extractorRevision = 2
 
 // providerDigest fingerprints what extraction under language depends on:
 // the index format's identity version, the resolved server command and
