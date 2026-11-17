@@ -72,10 +72,12 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 
 	// 4. Update .gitignore
-	if err := updateGitignore(cwd); err != nil {
+	if added, err := updateGitignore(cwd); err != nil {
 		fmt.Printf("⚠️  %s: %v\n", Warning("Could not update .gitignore"), err)
-	} else {
+	} else if added {
 		fmt.Printf("📝 Added %s to .gitignore\n", Dim("\".codegraph/\""))
+	} else {
+		fmt.Printf("⏭️  %s already has %s\n", Path(".gitignore"), Dim("\".codegraph/\""))
 	}
 
 	// 5. Register project
@@ -119,8 +121,8 @@ func registerProject(ctx context.Context, cwd string) error {
 	})
 }
 
-// updateGitignore adds .codegraph/ to .gitignore if not already present
-func updateGitignore(projectRoot string) error {
+// updateGitignore adds .codegraph/ if absent and reports whether it was added.
+func updateGitignore(projectRoot string) (bool, error) {
 	gitignorePath := filepath.Join(projectRoot, ".gitignore")
 	entry := ".codegraph/"
 
@@ -129,7 +131,7 @@ func updateGitignore(projectRoot string) error {
 		scanner := bufio.NewScanner(strings.NewReader(string(data)))
 		for scanner.Scan() {
 			if strings.TrimSpace(scanner.Text()) == entry {
-				return nil // Already present
+				return false, nil // Already present
 			}
 		}
 	}
@@ -137,7 +139,7 @@ func updateGitignore(projectRoot string) error {
 	// Append entry
 	f, err := os.OpenFile(gitignorePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer f.Close()
 
@@ -146,5 +148,5 @@ func updateGitignore(projectRoot string) error {
 		f.WriteString("\n")
 	}
 	_, err = f.WriteString(entry + "\n")
-	return err
+	return err == nil, err
 }
