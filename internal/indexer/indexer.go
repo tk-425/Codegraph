@@ -459,7 +459,7 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 		}
 		totalCalls += calls
 	}
-	fmt.Fprintf(i.progress, "   Found %d call relationships\n", totalCalls)
+	fmt.Fprintf(i.progress, "   Extracted %d call observations this build (before publication deduplication)\n", totalCalls)
 
 	// Index type hierarchy for each dirty language
 	fmt.Fprintln(i.progress, "🔗 Extracting type hierarchy...")
@@ -501,7 +501,7 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 		}
 		totalHierarchy += count
 	}
-	fmt.Fprintf(i.progress, "   Found %d type relationships\n", totalHierarchy)
+	fmt.Fprintf(i.progress, "   Extracted %d type-relation observations this build (before publication deduplication)\n", totalHierarchy)
 
 	// Publish the candidate: the dirty languages' edge sets were
 	// re-extracted this attempt, and the removed files disappear with it.
@@ -527,8 +527,11 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 	for _, count := range i.snapshot.Counts.Unresolved {
 		unresolved += count
 	}
-	fmt.Fprintf(i.progress, "✅ Indexed %d files, skipped %d unchanged, %d symbols, %d calls, %d type relations, %d unresolved sites\n",
-		indexedFiles, skippedFiles, totalSymbols, totalCalls, totalHierarchy, unresolved)
+	fmt.Fprintf(i.progress, "Build work: Indexed %d files, skipped %d unchanged; extracted %d symbols, %d call observations, %d type-relation observations\n",
+		indexedFiles, skippedFiles, totalSymbols, totalCalls, totalHierarchy)
+	counts := i.snapshot.Counts
+	fmt.Fprintf(i.progress, "✅ Published graph: %d files, %d symbols, %d calls, %d type relations, %d unresolved sites\n",
+		counts.Files, counts.Symbols, counts.Calls, counts.TypeRelationships, unresolved)
 	return nil
 }
 
