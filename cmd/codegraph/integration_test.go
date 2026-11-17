@@ -6,7 +6,8 @@
 //
 //	go test -tags integration -count=1 ./cmd/codegraph
 //
-// gopls is located on PATH or via CODEGRAPH_INTEGRATION_GOPLS.
+// Servers are located on PATH or via CODEGRAPH_INTEGRATION_GOPLS and
+// CODEGRAPH_INTEGRATION_PYRIGHT.
 package main
 
 import (
@@ -349,4 +350,112 @@ func TestIntegrationGoplsBuildContext(t *testing.T) {
 	}
 	buildSnapshot(precedence, true)
 	requireTaggedCaller(append(envWithoutGOFLAGS(), "GOFLAGS=-tags=other"))
+}
+
+// TestIntegrationRealPyrightWorkspace requires a real project workspace and
+// semantic cross-file calls from Pyright, not successful syntax fallback.
+func TestIntegrationRealPyrightWorkspace(t *testing.T) {
+	pyright := os.Getenv("CODEGRAPH_INTEGRATION_PYRIGHT")
+	if pyright == "" {
+		resolved, err := exec.LookPath("pyright-langserver")
+		if err != nil {
+			t.Skipf("pyright-langserver not found; the real Pyright workspace capability is NOT verified by this skip: %v", err)
+		}
+		pyright = resolved
+	}
+	pyright, err := filepath.Abs(pyright)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(pyright); err != nil || info.IsDir() {
+		t.Skipf("pyright-langserver %s unusable; the real Pyright workspace capability is NOT verified by this skip: %v", pyright, err)
+	}
+
+	// Spaces and '#' exercise encoded folder URIs at the real-server seam.
+	root := filepath.Join(t.TempDir(), "python workspace #1")
+	if err := os.MkdirAll(filepath.Join(root, ".codegraph"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(relative, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, relative), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("helpers.py", "def target():\n    return 1\n")
+	write("main.py", "from helpers import target\n\ndef caller():\n    return target()\n")
+	write(filepath.Join(".codegraph", ".cgignore"), "")
+	cfg := config.DefaultConfig()
+	cfg.LSP["python"] = config.LSPConfig{Command: pyright, Args: []string{"--stdio"}}
+	if err := config.Save(root, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	build := runCLIIntegration(t, root, 120*time.Second, "build", "--json")
+	output := requireOneEnvelope(t, build)
+	if build.exit != 0 || output.Command != "build" || len(output.Errors) != 0 {
+		t.Fatalf("Pyright build exit=%d stdout=%s stderr=%s", build.exit, build.stdout, build.stderr)
+	}
+	for _, raw := range output.Results {
+		var diagnostic struct {
+			Language string `json:"language"`
+			Category string `json:"category"`
+			Reason   string `json:"reason"`
+		}
+		if err := json.Unmarshal(raw, &diagnostic); err != nil {
+			t.Fatal(err)
+		}
+		if diagnostic.Language != "python" {
+			continue
+		}
+		if strings.Contains(diagnostic.Reason, "<default workspace root>") {
+			t.Fatalf("Pyright used its placeholder workspace: %s", build.stdout)
+		}
+		switch diagnostic.Category {
+		case "missing_executable", "initialization_failure", "request_failed", "cleanup_failed":
+			t.Fatalf("Pyright provider failed: %s", build.stdout)
+		}
+	}
+	var report struct {
+		Metadata struct {
+			Snapshot *db.Snapshot     `json:"snapshot"`
+			Attempt  *db.BuildAttempt `json:"attempt"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(build.stdout, &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Metadata.Snapshot == nil || report.Metadata.Attempt == nil || report.Metadata.Attempt.Outcome != "succeeded" || !report.Metadata.Attempt.Changed {
+		t.Fatalf("Pyright build did not publish a successful changed attempt: %s", build.stdout)
+	}
+	semanticCalls := false
+	for _, phase := range report.Metadata.Attempt.Phases {
+		if phase.Language == "python" && phase.Phase == "calls" && phase.Provider == "lsp" && phase.Status == "complete" && phase.FailedRequests == 0 && phase.Records > 0 {
+			semanticCalls = true
+		}
+	}
+	if !semanticCalls {
+		t.Fatalf("Pyright build did not extract semantic calls: %s", build.stdout)
+	}
+
+	callers := runCLIIntegration(t, root, 60*time.Second, "callers", "target", "--json")
+	called := requireOneEnvelope(t, callers)
+	if callers.exit != 0 || called.Command != "callers" || len(called.Errors) != 0 {
+		t.Fatalf("Pyright callers exit=%d stdout=%s stderr=%s", callers.exit, callers.stdout, callers.stderr)
+	}
+	for _, raw := range called.Results {
+		var record struct {
+			Name     string   `json:"name"`
+			Source   string   `json:"source"`
+			Origin   string   `json:"origin"`
+			Evidence []string `json:"evidence"`
+		}
+		if err := json.Unmarshal(raw, &record); err != nil {
+			t.Fatal(err)
+		}
+		if record.Name == "caller" && record.Source == "lsp" && record.Origin == "stored" && slices.Contains(record.Evidence, "lsp-call-hierarchy") {
+			return
+		}
+	}
+	t.Fatalf("Pyright caller lacks cross-file LSP call-hierarchy evidence: %s", callers.stdout)
 }

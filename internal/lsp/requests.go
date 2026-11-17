@@ -2,11 +2,18 @@ package lsp
 
 // LSP Request/Response types for initialization and common requests
 
+// WorkspaceFolder identifies a project workspace (LSP 3.17).
+type WorkspaceFolder struct {
+	URI  string `json:"uri"`
+	Name string `json:"name"`
+}
+
 // InitializeParams sent to server during initialization
 type InitializeParams struct {
-	ProcessID    int                `json:"processId"`
-	RootURI      string             `json:"rootUri"`
-	Capabilities ClientCapabilities `json:"capabilities"`
+	ProcessID        int                `json:"processId"`
+	RootURI          string             `json:"rootUri"`
+	WorkspaceFolders []WorkspaceFolder  `json:"workspaceFolders"`
+	Capabilities     ClientCapabilities `json:"capabilities"`
 	// InitializationOptions carries server settings at initialize; gopls
 	// documents this channel for settings like buildFlags.
 	InitializationOptions map[string]any `json:"initializationOptions,omitempty"`
@@ -49,7 +56,8 @@ type TypeHierarchyClientCapabilities struct {
 
 // WorkspaceClientCapabilities for workspace features
 type WorkspaceClientCapabilities struct {
-	Symbol WorkspaceSymbolClientCapabilities `json:"symbol,omitempty"`
+	Symbol           WorkspaceSymbolClientCapabilities `json:"symbol,omitempty"`
+	WorkspaceFolders bool                              `json:"workspaceFolders,omitempty"`
 	// Configuration reports that this client answers
 	// workspace/configuration requests (LSP 3.17); advertised only when
 	// server settings exist.
@@ -175,6 +183,7 @@ func DefaultClientCapabilities() ClientCapabilities {
 			},
 		},
 		Workspace: WorkspaceClientCapabilities{
+			WorkspaceFolders: true,
 			Symbol: WorkspaceSymbolClientCapabilities{
 				DynamicRegistration: false,
 			},

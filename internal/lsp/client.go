@@ -271,13 +271,23 @@ func (c *Client) ServerSettings() map[string]any {
 	return c.serverSettings
 }
 
+// workspaceFolders is shared by initialization and later workspace queries.
+// Keep the encoded root URI and existing display name unchanged.
+func (c *Client) workspaceFolders() []WorkspaceFolder {
+	if c.RootURI == "" {
+		return nil
+	}
+	return []WorkspaceFolder{{URI: c.RootURI, Name: "workspace"}}
+}
+
 // Initialize sends the initialize request to the LSP server. The caller's
 // context is its only budget; initialization is not an ordinary request.
 func (c *Client) Initialize(ctx context.Context) (*InitializeResult, error) {
 	params := InitializeParams{
-		ProcessID:    os.Getpid(),
-		RootURI:      c.RootURI,
-		Capabilities: DefaultClientCapabilities(),
+		ProcessID:        os.Getpid(),
+		RootURI:          c.RootURI,
+		WorkspaceFolders: c.workspaceFolders(),
+		Capabilities:     DefaultClientCapabilities(),
 	}
 	if settings := c.ServerSettings(); len(settings) > 0 {
 		params.InitializationOptions = settings
@@ -596,7 +606,7 @@ func (c *Client) respondToServerRequest(id json.RawMessage, method string, param
 			result = []any{}
 		}
 	case "workspace/workspaceFolders":
-		result = []map[string]string{{"uri": c.RootURI, "name": "workspace"}}
+		result = c.workspaceFolders()
 	default:
 		responseErr = &ResponseError{Code: methodNotFound, Message: "method not found"}
 	}
