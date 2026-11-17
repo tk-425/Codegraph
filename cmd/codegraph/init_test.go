@@ -53,6 +53,9 @@ func TestInitPreservesExistingArtifacts(t *testing.T) {
 			if first.exit != 0 || len(first.stderr) != 0 {
 				t.Fatalf("first init: exit=%d stdout=%q stderr=%q", first.exit, first.stdout, first.stderr)
 			}
+			if !strings.Contains(string(first.stdout), `.gitignore already has ".codegraph/"`) || strings.Contains(string(first.stdout), `Added ".codegraph/" to .gitignore`) {
+				t.Fatalf("existing gitignore entry misreported: %q", first.stdout)
+			}
 			for name, content := range map[string]string{"config.toml": test.config, ".cgignore": test.ignore} {
 				verb := "Created"
 				if content != "" {
@@ -80,6 +83,9 @@ func TestInitPreservesExistingArtifacts(t *testing.T) {
 			second := runCLI(t, root, "init")
 			if second.exit != 0 || len(second.stderr) != 0 {
 				t.Fatalf("repeat init: exit=%d stdout=%q stderr=%q", second.exit, second.stdout, second.stderr)
+			}
+			if !strings.Contains(string(second.stdout), `.gitignore already has ".codegraph/"`) || strings.Contains(string(second.stdout), `Added ".codegraph/" to .gitignore`) {
+				t.Fatalf("repeat init misreported gitignore entry: %q", second.stdout)
 			}
 			for _, name := range []string{"config.toml", ".cgignore"} {
 				if !strings.Contains(string(second.stdout), "Preserved .codegraph/"+name) || strings.Contains(string(second.stdout), "Created .codegraph/"+name) {
@@ -173,6 +179,9 @@ func TestInitCreatesMissingArtifacts(t *testing.T) {
 	ignore, err := os.ReadFile(filepath.Join(root, ".codegraph", ".cgignore"))
 	if err != nil || !strings.Contains(string(ignore), gitignore) {
 		t.Fatalf("ignore seed: content=%q err=%v", ignore, err)
+	}
+	if !strings.Contains(string(result.stdout), `Added ".codegraph/" to .gitignore`) || strings.Contains(string(result.stdout), `.gitignore already has ".codegraph/"`) {
+		t.Fatalf("new gitignore entry misreported: %q", result.stdout)
 	}
 	updatedGitignore, err := os.ReadFile(filepath.Join(root, ".gitignore"))
 	if err != nil || !strings.HasPrefix(string(updatedGitignore), gitignore) || strings.Count(string(updatedGitignore), ".codegraph/\n") != 1 {
