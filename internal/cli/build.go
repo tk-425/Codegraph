@@ -183,16 +183,23 @@ func printBuildContext(out io.Writer, cfg *config.Config) {
 	}
 }
 
-// printDiagnostics renders diagnostics for the human-readable build path. A
-// server-log record describes a running server reporting a problem and is never
-// rendered as unavailability.
+// printDiagnostics renders each condition without confusing a phase failure
+// or a server-reported problem with startup unavailability.
 func printDiagnostics(out io.Writer, diagnostics []lsp.LSPDiagnostic) {
 	for _, diagnostic := range diagnostics {
-		if diagnostic.Category == lsp.ServerLog {
+		label := "diagnostic"
+		switch diagnostic.Category {
+		case lsp.ServerLog:
 			fmt.Fprintf(out, "⚠️  %s LSP server reported a problem (%s) [%s]: %s\n", diagnostic.Language, diagnostic.Executable, diagnostic.Severity, diagnostic.Reason)
 			continue
+		case lsp.MissingExecutable, lsp.InitializationFailure:
+			label = "unavailable"
+		case lsp.RequestFailed:
+			label = "request failure"
+		case lsp.CleanupFailed:
+			label = "cleanup failure"
 		}
-		fmt.Fprintf(out, "⚠️  %s LSP unavailable (%s): %s\n", diagnostic.Language, diagnostic.Executable, diagnostic.Reason)
+		fmt.Fprintf(out, "⚠️  %s LSP %s (%s): %s\n", diagnostic.Language, label, diagnostic.Executable, diagnostic.Reason)
 		if diagnostic.Guidance == nil {
 			continue
 		}
