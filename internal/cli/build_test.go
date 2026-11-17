@@ -97,6 +97,34 @@ func TestPrintDiagnosticsStillRendersStartupFailuresAsUnavailable(t *testing.T) 
 	}
 }
 
+func TestPrintDiagnosticsDoesNotCallPhaseFailuresUnavailable(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		category lsp.DiagnosticCategory
+		reason   string
+	}{
+		{"request", lsp.RequestFailed, "calls phase: 1 LSP request(s) failed; first error: LSP error -32801: content modified"},
+		{"cleanup", lsp.CleanupFailed, "shutdown exceeded graceful budget"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			printDiagnostics(&out, []lsp.LSPDiagnostic{{
+				Language: "rust", Executable: "/Users/example/.cargo/bin/rust-analyzer",
+				Category: tc.category, Severity: lsp.SeverityWarning, Reason: tc.reason,
+			}})
+			rendered := out.String()
+			if strings.Contains(rendered, "LSP unavailable") {
+				t.Errorf("phase failure misreported as server unavailability: %s", rendered)
+			}
+			for _, want := range []string{"rust", "rust-analyzer", tc.reason} {
+				if !strings.Contains(rendered, want) {
+					t.Errorf("diagnostic omits %q: %s", want, rendered)
+				}
+			}
+		})
+	}
+}
+
 func TestPrintBuildContextShowsConfiguredGoFlags(t *testing.T) {
 	cfg := config.DefaultConfig()
 	goCfg := cfg.LSP["go"]
