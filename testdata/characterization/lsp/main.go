@@ -19,7 +19,7 @@ type request struct {
 	Method string          `json:"method"`
 	Params json.RawMessage `json:"params"`
 	// Result carries the payload when this message is a response to a
-	// request this peer sent (request-configuration mode).
+	// request this peer sent (configuration or workspace-folder mode).
 	Result json.RawMessage `json:"result"`
 }
 
@@ -28,6 +28,7 @@ func main() {
 	fixture := flag.String("responses", "", "method-to-result JSON fixture")
 	dumpInit := flag.String("dump-init", "", "append each initialize request's params JSON to this file")
 	dumpConfig := flag.String("dump-config", "", "in request-configuration mode, append the client's configuration response JSON to this file")
+	dumpWorkspace := flag.String("dump-workspace", "", "in request-workspace-folders mode, append the client's workspace response JSON to this file")
 	pidfile := flag.String("pidfile", "", "write this process ID to the file before serving")
 	flag.Parse()
 	if *pidfile != "" {
@@ -36,13 +37,13 @@ func main() {
 			os.Exit(2)
 		}
 	}
-	if err := serve(*mode, *fixture, *dumpInit, *dumpConfig); err != nil {
+	if err := serve(*mode, *fixture, *dumpInit, *dumpConfig, *dumpWorkspace); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
 }
 
-func serve(mode, fixture, dumpInit, dumpConfig string) error {
+func serve(mode, fixture, dumpInit, dumpConfig, dumpWorkspace string) error {
 	results := map[string]json.RawMessage{}
 	if fixture != "" {
 		data, err := os.ReadFile(fixture)
@@ -70,17 +71,22 @@ func serve(mode, fixture, dumpInit, dumpConfig string) error {
 			}
 			return nil
 		}
-		if message.Method == "initialized" && mode == "request-configuration" {
-			items := map[string]any{"items": []map[string]string{
-				{"scopeUri": rootURI, "section": "gopls"},
-				{"scopeUri": rootURI, "section": "other"},
-			}}
+		if message.Method == "initialized" && (mode == "request-configuration" || mode == "request-workspace-folders") {
+			method := "workspace/workspaceFolders"
+			var params any
+			if mode == "request-configuration" {
+				method = "workspace/configuration"
+				params = map[string]any{"items": []map[string]string{
+					{"scopeUri": rootURI, "section": "gopls"},
+					{"scopeUri": rootURI, "section": "other"},
+				}}
+			}
 			body, err := json.Marshal(struct {
 				JSONRPC string `json:"jsonrpc"`
 				ID      int    `json:"id"`
 				Method  string `json:"method"`
-				Params  any    `json:"params"`
-			}{"2.0", 1, "workspace/configuration", items})
+				Params  any    `json:"params,omitempty"`
+			}{"2.0", 1, method, params})
 			if err != nil {
 				return err
 			}
@@ -89,14 +95,20 @@ func serve(mode, fixture, dumpInit, dumpConfig string) error {
 			}
 			continue
 		}
-		if mode == "request-configuration" && message.Method == "" && len(message.ID) > 0 {
-			// The client's response to our configuration request; an omitted
-			// result is recorded as null.
+		if (mode == "request-configuration" || mode == "request-workspace-folders") && message.Method == "" && len(message.ID) > 0 {
+			// Record the response to the request sent after initialized.
 			payload := message.Result
 			if payload == nil {
+				if mode == "request-workspace-folders" {
+					return fmt.Errorf("workspace response omitted result")
+				}
 				payload = json.RawMessage("null")
 			}
-			if err := appendFile(dumpConfig, payload); err != nil {
+			dump := dumpConfig
+			if mode == "request-workspace-folders" {
+				dump = dumpWorkspace
+			}
+			if err := appendFile(dump, payload); err != nil {
 				return err
 			}
 			continue
