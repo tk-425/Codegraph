@@ -17,6 +17,52 @@ import (
 	"time"
 )
 
+func TestRegistryAddSameDirectoryAliases(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "Programming")
+	if err := os.Mkdir(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	check := func(t *testing.T, alias string) {
+		t.Helper()
+		original, err := os.Stat(project)
+		if err != nil {
+			t.Fatal(err)
+		}
+		other, err := os.Stat(alias)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !os.SameFile(original, other) {
+			t.Fatal("fixture paths do not identify the same directory")
+		}
+		reg := New()
+		reg.Add(project, "project")
+		reg.Add(alias, "project")
+		if len(reg.Projects) != 1 {
+			t.Fatalf("same directory registered %d times, want 1", len(reg.Projects))
+		}
+	}
+
+	t.Run("case", func(t *testing.T) {
+		alias := filepath.Join(root, "programming")
+		if _, err := os.Stat(alias); os.IsNotExist(err) {
+			t.Skip("filesystem distinguishes case; symlink subtest covers physical aliases")
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		check(t, alias)
+	})
+	t.Run("symlink", func(t *testing.T) {
+		alias := filepath.Join(root, "linked-project")
+		if err := os.Symlink(project, alias); err != nil {
+			t.Fatal(err)
+		}
+		check(t, alias)
+	})
+}
+
 // Re-execute the test binary in a fresh process so concurrency tests contend
 // on a real inter-process lock, not goroutines inside one process.
 func TestRegistryHelperProcess(t *testing.T) {

@@ -171,6 +171,19 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	printDiagnostics(os.Stdout, diagnostics)
 	if snapshot := idx.Snapshot(); snapshot != nil {
 		fmt.Fprintf(cmd.OutOrStdout(), "Snapshot %s: %s (freshness unchecked)\n", snapshot.ID, snapshot.Quality)
+		if snapshot.Quality == "degraded" {
+			// Explain the published snapshot, including phases retained on a no-op.
+			for _, phase := range snapshot.Phases {
+				if phase.Provider != "tree-sitter" && phase.Status != "failed" && phase.Status != "unsupported" && phase.Status != "fallback" {
+					continue
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "  %s %s / %s: %s", phase.Language, phase.Phase, phase.Provider, phase.Status)
+				if phase.Reason != "" {
+					fmt.Fprintf(cmd.OutOrStdout(), " — %s", phase.Reason)
+				}
+				fmt.Fprintln(cmd.OutOrStdout())
+			}
+		}
 	}
 	return nil
 }
