@@ -453,7 +453,7 @@ func (i *Indexer) IndexProject(ctx context.Context, files []FileInfo, force bool
 			i.attempt.Phases = append(i.attempt.Phases, fallback)
 			if err != nil {
 				// Only show warning if there was an actual error (not just 0 results)
-				fmt.Fprintf(i.progress, "   ⚠️  Call graph LSP error for %s (using tree-sitter): %v\n", language, err)
+				fmt.Fprintf(i.progress, "   ⚠️  Call graph LSP error for %s (tree-sitter calls: %s, %d observations): %v\n", language, fallback.Status, fallback.Records, err)
 			}
 			continue
 		}
