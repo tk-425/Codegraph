@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 )
 
@@ -116,6 +117,21 @@ func publish(ctx context.Context, path string, data []byte) error {
 // Add updates or creates a project entry
 func (r *Registry) Add(path, name string) {
 	path = filepath.Clean(path)
+	// Reuse a physical directory's existing key, without silently removing
+	// legacy aliases. Explicit deduplication owns that migration.
+	if info, err := os.Stat(path); err == nil && info.IsDir() {
+		keys := make([]string, 0, len(r.Projects))
+		for key := range r.Projects {
+			keys = append(keys, key)
+		}
+		slices.Sort(keys)
+		for _, key := range keys {
+			if existing, err := os.Stat(key); err == nil && os.SameFile(info, existing) {
+				path = key
+				break
+			}
+		}
+	}
 	now := time.Now()
 
 	if proj, exists := r.Projects[path]; exists {

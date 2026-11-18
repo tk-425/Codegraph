@@ -17,7 +17,11 @@ var projectsCmd = &cobra.Command{
 	RunE:  runProjects,
 }
 
+var projectsDeduplicateFlag, projectsApplyFlag bool
+
 func init() {
+	projectsCmd.Flags().BoolVar(&projectsDeduplicateFlag, "deduplicate", false, "Preview duplicate-directory registry repairs")
+	projectsCmd.Flags().BoolVar(&projectsApplyFlag, "apply", false, "Apply --deduplicate repairs after backing up the registry")
 	supportJSON(projectsCmd)
 	rootCmd.AddCommand(projectsCmd)
 }
@@ -31,6 +35,9 @@ type projectRecord struct {
 }
 
 func runProjects(cmd *cobra.Command, args []string) error {
+	if projectsDeduplicateFlag || projectsApplyFlag {
+		return runProjectsDeduplicate(cmd)
+	}
 	if jsonOutputFlag {
 		cmd.SilenceUsage = true
 		cmd.SilenceErrors = true
