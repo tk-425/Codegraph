@@ -85,6 +85,70 @@ func TestBuildOutputOverlappingProviders(t *testing.T) {
 	}
 }
 
+func TestBuildOutputContentModifiedRecovery(t *testing.T) {
+	root := newSyntaxProject(t, map[string]string{
+		"source.go": "package fixture\nfunc Target() {}\nfunc Caller() { Target() }\n",
+	})
+	responses := map[string]any{
+		"textDocument/references@1": map[string]any{"__sequence__": []any{
+			map[string]any{"__error__": map[string]any{
+				"code": -32801, "message": "content modified",
+			}},
+			[]any{map[string]any{
+				"uri": "${ROOT_URI}/source.go",
+				"range": map[string]any{
+					"start": map[string]int{"line": 2, "character": 16},
+					"end":   map[string]int{"line": 2, "character": 22},
+				},
+			}},
+		}},
+	}
+	data, err := json.Marshal(responses)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := filepath.Join(t.TempDir(), "responses.json")
+	if err := os.WriteFile(fixture, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.LSP["go"] = config.LSPConfig{Command: buildProtocolPeer(t), Args: []string{"-responses", fixture}}
+	if err := config.Save(root, cfg); err != nil {
+		t.Fatal(err)
+	}
+	result := runCLI(t, root, "build")
+	if result.exit != 0 {
+		t.Fatalf("exit=%d stdout=%s stderr=%s", result.exit, result.stdout, result.stderr)
+	}
+	manager, err := db.OpenReadOnly(cfg.GetDatabasePath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	snapshot, err := manager.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot == nil || snapshot.Counts.Calls != 1 {
+		t.Fatalf("want one published edge: %+v", snapshot)
+	}
+	semantic, failed := 0, 0
+	for _, phase := range snapshot.Phases {
+		if phase.Phase == "calls" {
+			failed += phase.FailedRequests
+			if phase.Provider == "lsp" {
+				semantic += phase.Records
+			}
+		}
+	}
+	if semantic != 1 || failed != 0 {
+		t.Errorf("transient ContentModified was not recovered: semantic=%d failed=%d phases=%+v", semantic, failed, snapshot.Phases)
+	}
+	if strings.Contains(string(result.stdout), "LSP request failure") || strings.Contains(string(result.stdout), "content modified") {
+		t.Errorf("recovered request reported as failed: %s", result.stdout)
+	}
+}
+
 func TestBuildOutputDistinguishesWorkFromPublishedGraph(t *testing.T) {
 	root := newSyntaxProject(t, map[string]string{
 		"source.go": "package fixture\nfunc Target() {}\nfunc Caller() { Target() }\n",
