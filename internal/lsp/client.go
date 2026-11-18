@@ -368,11 +368,46 @@ func (c *Client) Close() error {
 	return nil
 }
 
-// Call sends a request and waits for its response within the request budget.
+// Call sends a request within one budget, including ContentModified retries.
 func (c *Client) Call(ctx context.Context, method string, params, result any) error {
 	ctx, cancel := c.withRequestBudget(ctx)
 	defer cancel()
-	return c.call(ctx, method, params, result)
+	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := c.call(ctx, method, params, result)
+		var responseErr *ResponseError
+		if attempt >= 2 || !retryableQuery(method) || !errors.As(err, &responseErr) || responseErr.Code != -32801 {
+			return err
+		}
+		// ContentModified can reflect a server workspace update even when
+		// our source is unchanged. Give it bounded time to settle, not a
+		// fresh request budget. c.call allocates a new ID for each attempt.
+		timer := time.NewTimer(time.Duration(attempt+1) * 50 * time.Millisecond)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-c.closed:
+			timer.Stop()
+			return c.closeErr
+		}
+	}
+}
+
+// Only read-only queries can be replayed; lifecycle and unknown requests cannot.
+func retryableQuery(method string) bool {
+	switch method {
+	case "textDocument/documentSymbol", "workspace/symbol",
+		"textDocument/references", "textDocument/implementation",
+		"textDocument/prepareCallHierarchy", "callHierarchy/incomingCalls", "callHierarchy/outgoingCalls",
+		"textDocument/prepareTypeHierarchy", "typeHierarchy/supertypes", "typeHierarchy/subtypes":
+		return true
+	default:
+		return false
+	}
 }
 
 // withRequestBudget bounds ctx by the request budget; an earlier parent

@@ -57,6 +57,7 @@ func serve(mode, fixture, dumpInit, dumpConfig, dumpWorkspace string) error {
 
 	reader := bufio.NewReader(os.Stdin)
 	rootURI := ""
+	responseIndexes := map[string]int{}
 	for {
 		message, err := readMessage(reader)
 		if err == io.EOF {
@@ -146,7 +147,22 @@ func serve(mode, fixture, dumpInit, dumpConfig, dumpWorkspace string) error {
 		}
 		configured, ok := results[key]
 		if !ok {
-			configured, ok = results[message.Method]
+			key = message.Method
+			configured, ok = results[key]
+		}
+		// Sequences model transient replies; repeat the last reply once exhausted.
+		if ok {
+			var sequence struct {
+				Replies []json.RawMessage `json:"__sequence__"`
+			}
+			if json.Unmarshal(configured, &sequence) == nil && len(sequence.Replies) > 0 {
+				index := responseIndexes[key]
+				if index >= len(sequence.Replies) {
+					index = len(sequence.Replies) - 1
+				}
+				configured = sequence.Replies[index]
+				responseIndexes[key]++
+			}
 		}
 		result := json.RawMessage("null")
 		if message.Method == "initialize" {
