@@ -21,9 +21,15 @@ type InitializeParams struct {
 
 // ClientCapabilities describes client capabilities
 type ClientCapabilities struct {
+	Window       WindowClientCapabilities       `json:"window,omitempty"`
 	General      GeneralClientCapabilities      `json:"general,omitempty"`
 	TextDocument TextDocumentClientCapabilities `json:"textDocument,omitempty"`
 	Workspace    WorkspaceClientCapabilities    `json:"workspace,omitempty"`
+}
+
+// WindowClientCapabilities advertises server-initiated work-done progress.
+type WindowClientCapabilities struct {
+	WorkDoneProgress bool `json:"workDoneProgress,omitempty"`
 }
 
 // GeneralClientCapabilities for general features
@@ -168,6 +174,7 @@ type ImplementationParams struct {
 // DefaultClientCapabilities returns capabilities we advertise to servers
 func DefaultClientCapabilities() ClientCapabilities {
 	return ClientCapabilities{
+		Window: WindowClientCapabilities{WorkDoneProgress: true},
 		General: GeneralClientCapabilities{
 			PositionEncodings: []PositionEncoding{EncodingUTF8, EncodingUTF16},
 		},

@@ -21,6 +21,8 @@ type request struct {
 	// Result carries the payload when this message is a response to a
 	// request this peer sent (configuration or workspace-folder mode).
 	Result json.RawMessage `json:"result"`
+	Error  json.RawMessage `json:"error"`
+	Body   json.RawMessage `json:"-"`
 }
 
 func main() {
@@ -44,6 +46,9 @@ func main() {
 }
 
 func serve(mode, fixture, dumpInit, dumpConfig, dumpWorkspace string) error {
+	if strings.HasPrefix(mode, "work-done-progress-") {
+		return serveProgress(mode)
+	}
 	results := map[string]json.RawMessage{}
 	if fixture != "" {
 		data, err := os.ReadFile(fixture)
@@ -219,6 +224,99 @@ func serve(mode, fixture, dumpInit, dumpConfig, dumpWorkspace string) error {
 	}
 }
 
+// serveProgress observes the real client's capability and create response.
+// The probe reply is withheld until the create handshake completes, avoiding
+// any dependency on scheduling or a sleep in the client test.
+func serveProgress(mode string) error {
+	reader := bufio.NewReader(os.Stdin)
+	var initialize json.RawMessage
+	var creation *request
+	var probe *request
+	active := false
+	retryStarted := false
+	var token any = "startup"
+	if strings.HasSuffix(mode, "integer") {
+		token = 7
+	} else if strings.HasSuffix(mode, "invalid") {
+		token = nil
+	}
+	emit := func(message any) error {
+		body, err := json.Marshal(message)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(os.Stdout, "Content-Length: %d\r\n\r\n%s", len(body), body)
+		return err
+	}
+	for {
+		message, err := readMessage(reader)
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		switch message.Method {
+		case "initialize":
+			initialize = message.Params
+			err = emit(map[string]any{"jsonrpc": "2.0", "id": message.ID, "result": map[string]any{"capabilities": map[string]any{}}})
+		case "initialized":
+			err = emit(map[string]any{"jsonrpc": "2.0", "id": "create-progress", "method": "window/workDoneProgress/create", "params": map[string]any{"token": token}})
+		case "":
+			if string(message.ID) == `"create-progress"` {
+				creation = &message
+				// A rejected create must not be followed by progress.
+				if len(message.Error) == 0 && !strings.Contains(mode, "created") && !strings.Contains(mode, "retry") {
+					kinds := []string{"begin", "report", "end"}
+					if strings.Contains(mode, "active") {
+						kinds = []string{"begin", "report"}
+						active = true
+					}
+					for _, kind := range kinds {
+						value := map[string]any{"kind": kind}
+						if kind == "begin" {
+							value["title"] = "Initial workspace load"
+						}
+						if err = emit(map[string]any{"jsonrpc": "2.0", "method": "$/progress", "params": map[string]any{"token": token, "value": value}}); err != nil {
+							return err
+						}
+					}
+				}
+			}
+		case "probe":
+			probe = &message
+		case "progress/end":
+			active = false
+			if err = emit(map[string]any{"jsonrpc": "2.0", "method": "$/progress", "params": map[string]any{"token": token, "value": map[string]any{"kind": "end"}}}); err == nil {
+				err = emit(map[string]any{"jsonrpc": "2.0", "id": message.ID, "result": nil})
+			}
+		case "textDocument/documentSymbol":
+			if strings.Contains(mode, "retry") && !retryStarted {
+				retryStarted, active = true, true
+				if err = emit(map[string]any{"jsonrpc": "2.0", "method": "$/progress", "params": map[string]any{"token": token, "value": map[string]any{"kind": "begin", "title": "Workspace update"}}}); err == nil {
+					err = emit(map[string]any{"jsonrpc": "2.0", "id": message.ID, "error": map[string]any{"code": -32801, "message": "content modified"}})
+				}
+			} else if active {
+				err = emit(map[string]any{"jsonrpc": "2.0", "id": message.ID, "error": map[string]any{"code": -32099, "message": "query arrived during observed progress"}})
+			} else {
+				err = emit(map[string]any{"jsonrpc": "2.0", "id": message.ID, "result": []any{}})
+			}
+		case "exit":
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if creation != nil && probe != nil {
+			result := map[string]any{"initialize": initialize, "creation": creation.Body}
+			if err := emit(map[string]any{"jsonrpc": "2.0", "id": probe.ID, "result": result}); err != nil {
+				return err
+			}
+			probe = nil
+		}
+	}
+}
+
 func appendFile(path string, data []byte) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
 	if err != nil {
@@ -264,6 +362,7 @@ func readMessage(reader *bufio.Reader) (request, error) {
 		return message, err
 	}
 	err := json.Unmarshal(body, &message)
+	message.Body = body
 	return message, err
 }
 
