@@ -66,3 +66,5 @@ tests/
 
 .pipeline/
 .pipeline-archive/
+
+.pip2p/
