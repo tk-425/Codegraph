@@ -40,6 +40,7 @@ type Client struct {
 	initialized bool
 	// capabilities are the server's, recorded at initialization.
 	capabilities ServerCapabilities
+	progress     workDoneProgress
 
 	// settingsMu guards serverSettings: the reader goroutine answers
 	// workspace/configuration from it while the manager may set it before
@@ -368,13 +369,19 @@ func (c *Client) Close() error {
 	return nil
 }
 
-// Call sends a request within one budget, including ContentModified retries.
+// Call sends a request within one budget, including observed work-done
+// progress and ContentModified retries. Progress silence is not readiness.
 func (c *Client) Call(ctx context.Context, method string, params, result any) error {
 	ctx, cancel := c.withRequestBudget(ctx)
 	defer cancel()
 	for attempt := 0; ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if retryableQuery(method) {
+			if err := c.waitForProgress(ctx); err != nil {
+				return err
+			}
 		}
 		err := c.call(ctx, method, params, result)
 		var responseErr *ResponseError
@@ -555,6 +562,10 @@ func (c *Client) readResponses() {
 			c.fail(fmt.Errorf("malformed message body: %w", err))
 			return
 		}
+		if message.Method == "$/progress" && len(message.ID) == 0 {
+			c.progress.observe(message.Params)
+			continue
+		}
 		if message.Method == "window/logMessage" {
 			var params LogMessageParams
 			if json.Unmarshal(message.Params, &params) == nil {
@@ -632,6 +643,12 @@ func (c *Client) respondToServerRequest(id json.RawMessage, method string, param
 	var result any
 	var responseErr *ResponseError
 	switch method {
+	case "window/workDoneProgress/create":
+		if _, valid := progressCreateToken(params); !valid {
+			responseErr = &ResponseError{Code: -32602, Message: "invalid progress token"}
+		} else {
+			result = json.RawMessage("null")
+		}
 	case "client/registerCapability", "client/unregisterCapability":
 		result = json.RawMessage("null")
 	case "workspace/configuration":
