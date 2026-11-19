@@ -575,7 +575,7 @@ func (h *HierarchyIndexer) extractRustHierarchy(node *sitter.Node, content []byt
 	return relationships
 }
 
-// Go hierarchy: implicit interfaces - detect by embedding
+// Go hierarchy: detect embedded struct fields
 func (h *HierarchyIndexer) extractGoHierarchy(node *sitter.Node, content []byte, file FileInfo) []*db.TypeHierarchy {
 	var relationships []*db.TypeHierarchy
 
@@ -596,27 +596,30 @@ func (h *HierarchyIndexer) extractGoHierarchy(node *sitter.Node, content []byte,
 				continue
 			}
 
-			typeName := nameNode.Content(content)
-			childID := typeName
-
-			// Check for struct with embedded types
-			if typeNode.Type() == "struct_type" {
-				for j := 0; j < int(typeNode.NamedChildCount()); j++ {
-					field := typeNode.NamedChild(j)
-					if field.Type() == "field_declaration" {
-						// Embedded field has no name, just a type
-						if field.ChildByFieldName("name") == nil {
-							typeField := field.ChildByFieldName("type")
-							if typeField != nil {
-								parentName := h.getTypeName(typeField, content)
-								relationships = append(relationships, &db.TypeHierarchy{
-									ChildID:      childID,
-									ParentID:     parentName,
-									Relationship: "embeds",
-								})
-							}
-						}
+			if typeNode.Type() != "struct_type" {
+				continue
+			}
+			childID := nameNode.Content(content)
+			for j := 0; j < int(typeNode.NamedChildCount()); j++ {
+				fields := typeNode.NamedChild(j)
+				if fields.Type() != "field_declaration_list" {
+					continue
+				}
+				for k := 0; k < int(fields.NamedChildCount()); k++ {
+					field := fields.NamedChild(k)
+					// Embedded fields have a type but no name.
+					if field.Type() != "field_declaration" || field.ChildByFieldName("name") != nil {
+						continue
 					}
+					typeField := field.ChildByFieldName("type")
+					if typeField == nil {
+						continue
+					}
+					relationships = append(relationships, &db.TypeHierarchy{
+						ChildID:      childID,
+						ParentID:     h.getTypeName(typeField, content),
+						Relationship: "embeds",
+					})
 				}
 			}
 		}

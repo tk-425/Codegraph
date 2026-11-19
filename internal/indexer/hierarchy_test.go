@@ -2,6 +2,8 @@ package indexer
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -30,6 +32,47 @@ func serverHierarchy(t *testing.T, fixture, name, language, responses string) (*
 		t.Fatal(err)
 	}
 	return p.database, count
+}
+
+func TestGoHierarchyFallbackStoresEmbedding(t *testing.T) {
+	database, file := syntaxIndex(t, "embedding.go", "go", `package fixture
+
+type Parent struct{}
+type Child struct{ Parent }
+type NamedOnly struct{ field Parent }
+`)
+	for _, name := range []string{"Parent", "Child", "NamedOnly"} {
+		if symbols := symbolsNamed(t, database, name); len(symbols) != 1 {
+			t.Fatalf("indexed %s symbols = %+v, want one", name, symbols)
+		}
+	}
+
+	root := filepath.Dir(file.Path)
+	count, err := NewHierarchyIndexer(database, nil, root).IndexHierarchyTreeSitter(context.Background(), file)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conn, err := sql.Open("sqlite3", filepath.Join(root, "graph.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	var evidence string
+	err = conn.QueryRow(`SELECT th.evidence FROM type_hierarchy th
+		JOIN symbols child ON child.id = th.child_id
+		JOIN symbols parent ON parent.id = th.parent_id
+		WHERE child.name = 'Child' AND parent.name = 'Parent' AND th.relationship = 'embeds'`).Scan(&evidence)
+	if errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("missing stored Child embeds Parent relationship (fallback recorded %d)", count)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence != "tree-sitter-hierarchy" || count != 1 {
+		t.Errorf("fallback recorded %d relationships with embedding evidence %q, want exactly one tree-sitter-hierarchy relationship", count, evidence)
+	}
 }
 
 // T16: a parent declared outside the project is recorded as external, with
